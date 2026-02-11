@@ -15,7 +15,7 @@ if (length(args) != 2) {
 input_path  <- args[1]
 output_root <- args[2]
 
-# Assumes pattern like: inputs/1/data_1.R
+# Assumes pattern like: inputs/0/data_1.R
 base_name <- basename(input_path)
 
 # Extract number after last underscore
@@ -183,7 +183,8 @@ res$criteria = list(
 )
 
 # ---- Create output directory ----
-output_dir <- file.path(output_root, index)
+subdir = as.character(floor(as.integer(index)/100))
+output_dir <- file.path(output_root, subdir)
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE)
 }
