@@ -131,9 +131,19 @@ fit = inla(
 print(fit$summary.fixed[1:min(10, nrow(fit$summary.fixed)), ])
 print(fit$summary.hyperpar)
 
+cat("Sampling joint posterior from computed marginals...\n")
+samples = inla.posterior.sample(2000, fit)
+
 ########################### SAVE RESULTS ###########################
 
-# Full plot-ready marginals for Beta; summary statistics for other marginals & hyperparameters
+# Only care about samples for betas (to save space)
+beta_samples = t(vapply(samples, function(s) {
+      s$latent[grep("^beta_", rownames(s$latent)), 1]
+}, numeric(length(fit$summary.fixed$mean))))
+
+colnames(beta_samples) = rownames(fit$summary.fixed)
+
+# Full plot-ready marginals & joint posteriors for Beta; summary statistics for other marginals & hyperparameters
 res = list(
   # store the controls used (so later scripts know what was requested)
   control = list(
@@ -162,8 +172,9 @@ res = list(
       sd = fit$summary.random$sample_id$sd
   ),
 
-  # keep only beta marginals to keep file size down
-  beta_marginals = fit$marginals.fixed[colnames(X)]
+  # keep only beta marginals & samples to keep file size down
+  beta_marginals = fit$marginals.fixed[colnames(X)],
+  beta_samples = beta_samples
 )
 
 # Summaries of model evaluation criteria: DIC, WAIC, CPO

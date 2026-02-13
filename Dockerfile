@@ -80,6 +80,9 @@ install.packages(
 EOF
 RUN R -e "library(INLA); print(inla.version())"
 
+# Install sn ("skew-normal") utilities needed to sample joint posterior from INLA marginals
+RUN R -e "install.packages('sn')"
+
 # Sanity check
 RUN R -e "library(fmesher); library(INLA); inla.version()"
 
