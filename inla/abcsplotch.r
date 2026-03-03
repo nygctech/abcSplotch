@@ -28,29 +28,45 @@ if (is.na(index) || index == base_name) {
 rdat = read_rdump(input_path)
 
 N = sum(rdat$N_spots)
-K = rdat$N_celltypes
 D = rdat$D
-E = rdat$E
 y = rdat$counts
 size_factors = rdat$size_factors
 log_size_factors = log(size_factors)
 
+# Check whether compositional and/or spatial information is present; adjust model accordingly
+compositional = ("N_celltypes" %in% names(rdat))
+spatial = (rdat$car > 0)
+
+if (compositional) {
+    K = rdat$N_celltypes
+    E = rdat$E
+}
+
 # Create sparse adjacency matrix
-i = rdat$W_sparse[, 1]
-j = rdat$W_sparse[, 2]
-W_sparse = sparseMatrix(
-    i = i,
-    j = j,
-    x = 1,
-    dims = c(N, N)
-)
-# sanity enforcement of symmetry
-W_sparse = (W_sparse + t(W_sparse)) > 0
+if (spatial) {
+    i = rdat$W_sparse[, 1]
+    j = rdat$W_sparse[, 2]
+    W_sparse = sparseMatrix(
+        i = i,
+        j = j,
+        x = 1,
+        dims = c(N, N)
+    )
+    # sanity enforcement of symmetry
+    W_sparse = (W_sparse + t(W_sparse)) > 0
+}
 
 # Derive spot-level labeling for each covariate group
-level_3 = rep(rdat$tissue_mapping, times = rdat$N_spots)
-level_2 = rdat$level_3_mapping[level_3]
-level_1 = rdat$level_2_mapping[level_2]
+if (rdat$N_level_3 > 0) {
+    level_3 = rep(rdat$tissue_mapping, times = rdat$N_spots)
+    level_2 = rdat$level_3_mapping[level_3]
+    level_1 = rdat$level_2_mapping[level_2]
+} else if (rdat$N_level_2 > 0) {
+    level_2 = rep(rdat$tissue_mapping, times = rdat$N_spots)
+    level_1 = rdat$level_2_mapping[level_2]
+} else {
+    level_1 = rep(rdat$tissue_mapping, times = rdat$N_spots)
+}
 
 ########################### CONSTRUCT DESIGN MATRIX ###########################
 
@@ -60,45 +76,75 @@ mroi_fac = factor(D)
 
 # Combine condition + MROI into a single group index
 g_fac = interaction(cond_fac, mroi_fac, drop = TRUE)  # levels correspond to (cond, MROI) combos -- e.g., "1.2"
+g_id = as.integer(g_fac)
 G = nlevels(g_fac)
 
-# Build fixed-effect design matrix X of size N x (G*K)
-X = matrix(0, nrow = N, ncol = G * K)
-# ...then populate with E (e.g., for sample i, X[i, (g_i, k)] = E[i,k]
-g_id = as.integer(g_fac)
-for (i in seq_len(N)) {
-    idx = (g_id[i] - 1) * K + seq_len(K)
-    X[i, idx] = E[i,]
+if (compositional) {
+    # Build fixed-effect design matrix X of size N x (G*K)
+    X = matrix(0, nrow = N, ncol = G * K)
+    # ...then populate with E (e.g., for sample i, X[i, (g_i, k)] = E[i,k]
+    for (i in seq_len(N)) {
+        idx = (g_id[i] - 1) * K + seq_len(K)
+        X[i, idx] = E[i,]
+    }
+} else {
+    # Build fixed-effect design matrix X of size N x G
+    X = matrix(0, nrow = N, ncol = G)
+    for (i in seq_len(N)) {
+        X[i, g_id[i]] = 1
+    }
 }
 
 # Make readable coefficient names: beta[g,k] where g encodes (condition, MROI)
 g_levels = levels(g_fac)  # by default, strings like "1.2"
-colnames(X) = as.vector(sapply(seq_len(G), function(g) {
-    paste0("beta_g", g, "_k", seq_len(K))    
-}))
+parts = strsplit(g_levels, ".", fixed = TRUE)
+c_idx = match(vapply(parts, `[`, "", 1), levels(cond_fac))
+m_idx = match(vapply(parts, `[`, "", 2), levels(mroi_fac))
+
+stopifnot(length(c_idx) == G, length(m_idx) == G)  # sanity check; c_idx and m_idx should both be equal to number of conditions
+
+if (compositional) {
+    colnames(X) <- as.vector(sapply(seq_len(G), function(g) {
+        paste0("beta_c", c_idx[g], "_m", m_idx[g], "_k", seq_len(K))
+    }))
+} else {
+    colnames(X) <- as.vector(sapply(seq_len(G), function(g) {
+        paste0("beta_c", c_idx[g], "_m", m_idx[g])
+    }))
+}
 
 # Dataframe for INLA model
 dat = data.frame(
     y = y,
     sample_id = seq_len(N),
-    region_id = seq_len(N),
     log_size_factor = log_size_factors
 )
+if (spatial) {
+    dat$region_id = seq_len(N)
+}
 
 # Bind X into Dataframe (INLA will treat columns as regular covariates)
 dat = cbind(dat, as.data.frame(X))
 
 ########################### BUILD & RUN MODEL ###########################
 
-# Defile Leroux CAR component
-LCAR.model = inla.LCAR.model(W=W_sparse)
-
-# Build GLM
-beta_terms = paste(colnames(X), collapse = " + ")
-glm = as.formula(paste0("y ~ 0 + ", beta_terms, 
-                        " + f(sample_id, model='iid', hyper=hyper_iid)",
-                        " + f(region_id, model=LCAR.model)",
-                        " + offset(log_size_factor)"))
+if (spatial) {
+    # Define Leroux CAR component
+    LCAR.model = inla.LCAR.model(W=W_sparse)
+    
+    # Build GLM
+    beta_terms = paste(colnames(X), collapse = " + ")
+    glm = as.formula(paste0("y ~ 0 + ", beta_terms, 
+                            " + f(sample_id, model='iid', hyper=hyper_iid)",
+                            " + f(region_id, model=LCAR.model)",
+                            " + offset(log_size_factor)"))
+} else {
+    # Build GLM
+    beta_terms = paste(colnames(X), collapse = " + ")
+    glm = as.formula(paste0("y ~ 0 + ", beta_terms, 
+                            " + f(sample_id, model='iid', hyper=hyper_iid)",
+                            " + offset(log_size_factor)"))
+}
 
 # Prior definitions
 # BETA:
@@ -163,10 +209,6 @@ res = list(
       mean = fit$summary.fitted.values$mean / size_factors,
       sd = fit$summary.fitted.values$sd / size_factors
   ),
-  psi = list(
-      mean = fit$summary.random$region_id$mean,
-      sd = fit$summary.random$region_id$sd
-  ),
   epsilon = list(
       mean = fit$summary.random$sample_id$mean,
       sd = fit$summary.random$sample_id$sd
@@ -176,6 +218,12 @@ res = list(
   beta_marginals = fit$marginals.fixed[colnames(X)],
   beta_samples = beta_samples
 )
+if (spatial) {
+    res$psi = list(
+        mean = fit$summary.random$region_id$mean,
+        sd = fit$summary.random$region_id$sd
+    )
+}
 
 # Summaries of model evaluation criteria: DIC, WAIC, CPO
 res$criteria = list(
@@ -206,3 +254,4 @@ output_file <- file.path(output_dir, paste0("results_", index, ".R"))
 saveRDS(res, file = output_file, compress = "xz")
 
 cat("Saved results to:", output_file, "\n")
+cat("Wrote file size (bytes):", file.info(output_file)$size, "\n")
