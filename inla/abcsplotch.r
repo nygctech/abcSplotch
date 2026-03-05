@@ -44,16 +44,25 @@ if (compositional) {
 
 # Create sparse adjacency matrix
 if (spatial) {
-    i = rdat$W_sparse[, 1]
-    j = rdat$W_sparse[, 2]
-    W_sparse = sparseMatrix(
-        i = i,
-        j = j,
-        x = 1,
-        dims = c(N, N)
+    i <- rdat$W_sparse[, 1]
+    j <- rdat$W_sparse[, 2]
+    
+    # Build symmetric adjacency directly (still sparse CSC / dgCMatrix)
+    W_sparse <- sparseMatrix(
+      i = c(i, j),
+      j = c(j, i),
+      x = 1,
+      dims = c(N, N),
+      giveCsparse = TRUE
     )
-    # sanity enforcement of symmetry
-    W_sparse = (W_sparse + t(W_sparse)) > 0
+    
+    # If duplicates exist, sparseMatrix will sum them (2,3,...) -> clamp back to 1
+    W_sparse@x[] <- 1
+    
+    # Ensure no self edges (optional safety)
+    Matrix::diag(W_sparse) <- 0
+    W_sparse <- Matrix::drop0(W_sparse)
+    #W_sparse = rdat$W_sparse
 }
 
 # Derive spot-level labeling for each covariate group
@@ -131,6 +140,7 @@ dat = cbind(dat, as.data.frame(X))
 if (spatial) {
     # Define Leroux CAR component
     LCAR.model = inla.LCAR.model(W=W_sparse)
+    #LCAR.model = inla.LCAR.edgelist(E=W_sparse, N=N)
     
     # Build GLM
     beta_terms = paste(colnames(X), collapse = " + ")
