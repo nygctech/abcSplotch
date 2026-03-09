@@ -4,6 +4,8 @@ library(Matrix)
 
 source("LCAR.r")
 
+script_start_time <- Sys.time()
+
 ########################### READ INPUT DATA ###########################
 
 args <- commandArgs(trailingOnly = TRUE)
@@ -89,20 +91,33 @@ g_id = as.integer(g_fac)
 G = nlevels(g_fac)
 
 if (compositional) {
-    # Build fixed-effect design matrix X of size N x (G*K)
-    X = matrix(0, nrow = N, ncol = G * K)
-    # ...then populate with E (e.g., for sample i, X[i, (g_i, k)] = E[i,k]
-    for (i in seq_len(N)) {
-        idx = (g_id[i] - 1) * K + seq_len(K)
-        X[i, idx] = E[i,]
-    }
+  stopifnot(nrow(E) == N, ncol(E) == K)
+
+  # For each row i, nonzeros are in columns (g_id[i]-1)*K + 1..K with values E[i,]
+  i_idx = rep(seq_len(N), each = K)                        # length N*K
+  j_idx = (rep(g_id, each = K) - 1L) * K + rep(seq_len(K), times = N)
+  x_val = as.numeric(t(E))                                 # row-wise flatten: E[1,], E[2,], ...
+
+  X = sparseMatrix(
+    i = i_idx,
+    j = j_idx,
+    x = x_val,
+    dims = c(N, G * K),
+    giveCsparse = TRUE
+  )
+
 } else {
-    # Build fixed-effect design matrix X of size N x G
-    X = matrix(0, nrow = N, ncol = G)
-    for (i in seq_len(N)) {
-        X[i, g_id[i]] = 1
-    }
+  # One-hot: row i has a single 1 in column g_id[i]
+  X = sparseMatrix(
+    i = seq_len(N),
+    j = g_id,
+    x = 1,
+    dims = c(N, G),
+    giveCsparse = TRUE
+  )
 }
+
+X = drop0(X)  # optional cleanup
 
 # Make readable coefficient names: beta[g,k] where g encodes (condition, MROI)
 g_levels = levels(g_fac)  # by default, strings like "1.2"
@@ -122,47 +137,38 @@ if (compositional) {
     }))
 }
 
-# Dataframe for INLA model
-dat = data.frame(
-    y = y,
-    sample_id = seq_len(N),
-    log_size_factor = log_size_factors
+# Tell INLA how to map data to parameters
+# - inla.stack is a fancy DataFrame that can handle different-dimension input
+# - Our "betas" are length p (conds * mrois * celltypes) while spot_ids, scale_factors are length N
+p = ncol(X)
+
+effects = list(
+    beta = 1:p,
+    sample_id = 1:N
 )
-if (spatial) {
-    dat$region_id = seq_len(N)
-}
 
-# Bind X into Dataframe (INLA will treat columns as regular covariates)
-dat = cbind(dat, as.data.frame(X))
-
-########################### BUILD & RUN MODEL ###########################
+A = list(
+    X,                 # maps beta (length p) -> N observations
+    1                  # maps sample_id (length N) -> N observations (identity)
+)
 
 if (spatial) {
-    # Define Leroux CAR component
-    LCAR.model = inla.LCAR.model(W=W_sparse)
-    #LCAR.model = inla.LCAR.edgelist(E=W_sparse, N=N)
-    
-    # Build GLM
-    beta_terms = paste(colnames(X), collapse = " + ")
-    glm = as.formula(paste0("y ~ 0 + ", beta_terms, 
-                            " + f(sample_id, model='iid', hyper=hyper_iid)",
-                            " + f(region_id, model=LCAR.model)",
-                            " + offset(log_size_factor)"))
-} else {
-    # Build GLM
-    beta_terms = paste(colnames(X), collapse = " + ")
-    glm = as.formula(paste0("y ~ 0 + ", beta_terms, 
-                            " + f(sample_id, model='iid', hyper=hyper_iid)",
-                            " + offset(log_size_factor)"))
+    effects$region_id = 1:N
+    A = c(A, list(1))       # maps region_id (length N) -> N observations (identity)
 }
 
-# Prior definitions
+stk = inla.stack(
+    data = list(y = y),
+    A = A,
+    effects = effects,
+    tag = "est"
+)
+
+########################### DEFINE PRIORS ###########################
+
 # BETA:
-control.fixed = list(
-    mean = list(default = 0), 
-    prec = list(default = 0.25)  # SD=2 in Splotch
-)
-# can be replaced with beta_prior_mean and beta_prior_std vectors of length ncol(X) when snRNA-seq priors available
+beta_prec = 0.25   # SD = 2, as in Stan formulation
+# TODO: allow modulation of beta_mean and beta_prec?
 
 # EPSILON:
 # In Stan implementation, hyperprior on SD of epsilon is HalfNormal(0,0.3)
@@ -174,30 +180,73 @@ hyper_iid <- list(
   )
 )
 
+# PSI: (within LCAR.r)
+
+########################### BUILD & RUN MODEL ###########################
+
+# Formula: no intercept; offset passed later to fit; beta is a latent coefficient vector
+fml = y ~ 0 +
+  f(beta, model = "iid",
+    hyper = list(
+      prec = list(initial = log(beta_prec), fixed = TRUE)
+    )
+  ) +
+  f(sample_id, model = "iid", hyper = hyper_iid)
+
+if (spatial) {
+    # Define Leroux CAR component
+    LCAR.model = inla.LCAR.model(W=W_sparse)
+    fml = update(fml, . ~ . + f(region_id, model = LCAR.model))
+}
+
 fit = inla(
-    glm,
+    fml,
     family = "nbinomial",
-    data = dat,
-    control.predictor = list(compute = TRUE),  # save the lambdas (actually nu = log_lambda + log_size_factor)
+    data = inla.stack.data(stk),
+    control.predictor = list(A = inla.stack.A(stk), compute = TRUE),
     control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE, config = TRUE),
-    control.fixed = control.fixed
+    offset = log_size_factors
 )
 
 # Quick check
-print(fit$summary.fixed[1:min(10, nrow(fit$summary.fixed)), ])
+beta_summary = fit$summary.random$beta
+beta_summary$coef = colnames(X)
+print(beta_summary[1:min(10, nrow(beta_summary)), ])
 print(fit$summary.hyperpar)
 
+# Sample joint posterior, only saving results from betas:
 cat("Sampling joint posterior from computed marginals...\n")
 samples = inla.posterior.sample(2000, fit)
 
 ########################### SAVE RESULTS ###########################
 
 # Only care about samples for betas (to save space)
-beta_samples = t(vapply(samples, function(s) {
-      s$latent[grep("^beta_", rownames(s$latent)), 1]
-}, numeric(length(fit$summary.fixed$mean))))
 
-colnames(beta_samples) = rownames(fit$summary.fixed)
+# Identify beta entries in the latent vector
+latent_names <- rownames(samples[[1]]$latent)
+# Most common latent naming (assigned by INLA): "beta:1", "beta:2", ...
+beta_rows <- grep("^beta(:|\\b)", latent_names)
+
+# If your INLA uses "beta_idx" or other name, adjust "^beta" to your effect name
+if (length(beta_rows) != ncol(X)) {
+  stop("Could not uniquely identify beta rows in posterior samples. ",
+       "Found ", length(beta_rows), " but expected ", ncol(X),
+       ". Example names: ", paste(head(latent_names, 10), collapse = ", "))
+}
+
+beta_samples <- t(vapply(samples, function(s) {
+  as.numeric(s$latent[beta_rows, 1])
+}, numeric(length(beta_rows))))
+
+colnames(beta_samples) = colnames(X)
+
+# Full plot-ready marginals for beta (now in marginals.random$beta)
+beta_marginals <- fit$marginals.random$beta
+names(beta_marginals) <- colnames(X)
+
+# Separate per-spot/cell estimates (defined as "est" in inla.stack) from fixed effects (betas)
+idx_est = inla.stack.index(stk, tag = "est")$data
+stopifnot(length(idx_est) == length(size_factors))
 
 # Full plot-ready marginals & joint posteriors for Beta; summary statistics for other marginals & hyperparameters
 res = list(
@@ -208,16 +257,16 @@ res = list(
   ),
 
   # summaries
-  beta_summary  = fit$summary.fixed,
+  beta_summary  = beta_summary,
   hyper_summary  = fit$summary.hyperpar,
 
   log_lambda = list(
-      mean = fit$summary.linear.predictor$mean - log_size_factors,
-      sd = fit$summary.linear.predictor$sd
+      mean = fit$summary.linear.predictor$mean[idx_est],
+      sd = fit$summary.linear.predictor$sd[idx_est]
   ),
   lambda = list(
-      mean = fit$summary.fitted.values$mean / size_factors,
-      sd = fit$summary.fitted.values$sd / size_factors
+      mean = fit$summary.fitted.values$mean[idx_est] / size_factors,
+      sd = fit$summary.fitted.values$sd[idx_est] / size_factors
   ),
   epsilon = list(
       mean = fit$summary.random$sample_id$mean,
@@ -225,7 +274,7 @@ res = list(
   ),
 
   # keep only beta marginals & samples to keep file size down
-  beta_marginals = fit$marginals.fixed[colnames(X)],
+  beta_marginals = beta_marginals,
   beta_samples = beta_samples
 )
 if (spatial) {
@@ -263,5 +312,18 @@ output_file <- file.path(output_dir, paste0("results_", index, ".R"))
 
 saveRDS(res, file = output_file, compress = "xz")
 
+########################### RUNTIME LOGGING ###########################
+
 cat("Saved results to:", output_file, "\n")
 cat("Wrote file size (bytes):", file.info(output_file)$size, "\n")
+
+script_end_time <- Sys.time()
+elapsed_secs <- as.numeric(difftime(script_end_time, script_start_time, units = "secs"))
+hours <- floor(elapsed_secs / 3600)
+minutes <- floor((elapsed_secs %% 3600) / 60)
+seconds <- elapsed_secs %% 60
+
+cat("\n")
+cat("Script started:", format(script_start_time, "%Y-%m-%d %H:%M:%S"), "\n")
+cat("Script ended:  ", format(script_end_time, "%Y-%m-%d %H:%M:%S"), "\n")
+cat(sprintf("Runtime: %02d:%02d:%05.2f (hh:mm:ss)\n", hours, minutes, seconds))
