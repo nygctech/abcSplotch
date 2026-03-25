@@ -214,31 +214,42 @@ beta_summary$coef = colnames(X)
 print(beta_summary[1:min(10, nrow(beta_summary)), ])
 print(fit$summary.hyperpar)
 
+########################### SAMPLE JOINT POSTERIOR ###########################
+
 # Sample joint posterior, only saving results from betas:
 cat("Sampling joint posterior from computed marginals...\n")
-samples = inla.posterior.sample(2000, fit)
 
-########################### SAVE RESULTS ###########################
+# Chunking reduces peak memory usage, as INLA generates full posterior then returns subset
+n_total <- 1000
+chunk_size <- 50
 
-# Only care about samples for betas (to save space)
+beta_samples <- matrix(NA_real_, n_total, p)
 
-# Identify beta entries in the latent vector
-latent_names <- rownames(samples[[1]]$latent)
-# Most common latent naming (assigned by INLA): "beta:1", "beta:2", ...
-beta_rows <- grep("^beta(:|\\b)", latent_names)
+starts <- seq(1, n_total, by = chunk_size)
 
-# If your INLA uses "beta_idx" or other name, adjust "^beta" to your effect name
-if (length(beta_rows) != ncol(X)) {
-  stop("Could not uniquely identify beta rows in posterior samples. ",
-       "Found ", length(beta_rows), " but expected ", ncol(X),
-       ". Example names: ", paste(head(latent_names, 10), collapse = ", "))
+for (s in starts) {
+  m <- min(chunk_size, n_total - s + 1)
+
+  samp_chunk <- inla.posterior.sample(
+    n = m,
+    result = fit,
+    selection = list(beta = 1:p),
+    add.names = FALSE
+  )
+
+  beta_samples[s:(s + m - 1), ] <- t(vapply(
+    samp_chunk,
+    function(z) as.numeric(z$latent[, 1]),
+    numeric(p)
+  ))
+
+  rm(samp_chunk)
+  gc()
 }
 
-beta_samples <- t(vapply(samples, function(s) {
-  as.numeric(s$latent[beta_rows, 1])
-}, numeric(length(beta_rows))))
+colnames(beta_samples) <- colnames(X)
 
-colnames(beta_samples) = colnames(X)
+########################### SAVE RESULTS ###########################
 
 # Full plot-ready marginals for beta (now in marginals.random$beta)
 beta_marginals <- fit$marginals.random$beta
