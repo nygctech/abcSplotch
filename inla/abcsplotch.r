@@ -10,12 +10,13 @@ script_start_time <- Sys.time()
 
 args <- commandArgs(trailingOnly = TRUE)
 
-if (length(args) != 2) {
-  stop("Usage: Rscript model_script.R <input_rdat_path> <output_directory>")
+if (length(args) < 2) {
+  stop("Usage: Rscript model_script.R <input_rdat_path> <output_directory> [TRUE/FALSE (sample posterior)]")
 }
 
 input_path  <- args[1]
 output_root <- args[2]
+draw_samples <- if (length(args) > 2) { tolower(args[4]) %in% c("true", "t", "1", "yes") } else FALSE
 
 # Assumes pattern like: inputs/0/data_1.R
 base_name <- basename(input_path)
@@ -64,7 +65,6 @@ if (spatial) {
     # Ensure no self edges (optional safety)
     Matrix::diag(W_sparse) <- 0
     W_sparse <- Matrix::drop0(W_sparse)
-    #W_sparse = rdat$W_sparse
 }
 
 # Derive spot-level labeling for each covariate group
@@ -199,14 +199,15 @@ if (spatial) {
     fml = update(fml, . ~ . + f(region_id, model = LCAR.model))
 }
 
-fit = inla(
-    fml,
+fit_args = list(
+    formula = fml,
     family = "nbinomial",
     data = inla.stack.data(stk),
     control.predictor = list(A = inla.stack.A(stk), compute = TRUE),
     control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE, config = TRUE),
     offset = log_size_factors
 )
+fit = do.call(INLA::inla, fit_args)
 
 # Quick check
 beta_summary = fit$summary.random$beta
@@ -216,38 +217,41 @@ print(fit$summary.hyperpar)
 
 ########################### SAMPLE JOINT POSTERIOR ###########################
 
-# Sample joint posterior, only saving results from betas:
-cat("Sampling joint posterior from computed marginals...\n")
-
-# Chunking reduces peak memory usage, as INLA generates full posterior then returns subset
-n_total <- 1000
-chunk_size <- 50
-
-beta_samples <- matrix(NA_real_, n_total, p)
-
-starts <- seq(1, n_total, by = chunk_size)
-
-for (s in starts) {
-  m <- min(chunk_size, n_total - s + 1)
-
-  samp_chunk <- inla.posterior.sample(
-    n = m,
-    result = fit,
-    selection = list(beta = 1:p),
-    add.names = FALSE
-  )
-
-  beta_samples[s:(s + m - 1), ] <- t(vapply(
-    samp_chunk,
-    function(z) as.numeric(z$latent[, 1]),
-    numeric(p)
-  ))
-
-  rm(samp_chunk)
-  gc()
+# Expensive; and not yielding comparable results to BF testing on Bayesian posteriors.
+if (draw_samples) {
+    # Sample joint posterior, only saving results from betas:
+    cat("Sampling joint posterior from computed marginals...\n")
+    
+    # Chunking reduces peak memory usage, as INLA generates full posterior then returns subset
+    n_total <- 1000
+    chunk_size <- 50
+    
+    beta_samples <- matrix(NA_real_, n_total, p)
+    
+    starts <- seq(1, n_total, by = chunk_size)
+    
+    for (s in starts) {
+      m <- min(chunk_size, n_total - s + 1)
+    
+      samp_chunk <- inla.posterior.sample(
+        n = m,
+        result = fit,
+        selection = list(beta = 1:p),
+        add.names = FALSE
+      )
+    
+      beta_samples[s:(s + m - 1), ] <- t(vapply(
+        samp_chunk,
+        function(z) as.numeric(z$latent[, 1]),
+        numeric(p)
+      ))
+    
+      rm(samp_chunk)
+      gc()
+    }
+    
+    colnames(beta_samples) <- colnames(X)
 }
-
-colnames(beta_samples) <- colnames(X)
 
 ########################### SAVE RESULTS ###########################
 
@@ -284,15 +288,17 @@ res = list(
       sd = fit$summary.random$sample_id$sd
   ),
 
-  # keep only beta marginals & samples to keep file size down
-  beta_marginals = beta_marginals,
-  beta_samples = beta_samples
+  # keep only beta marginals to keep file size down
+  beta_marginals = beta_marginals
 )
 if (spatial) {
     res$psi = list(
         mean = fit$summary.random$region_id$mean,
         sd = fit$summary.random$region_id$sd
     )
+}
+if (draw_samples) {
+    res$beta_samples = beta_samples
 }
 
 # Summaries of model evaluation criteria: DIC, WAIC, CPO
