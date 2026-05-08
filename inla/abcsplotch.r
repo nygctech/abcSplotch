@@ -36,9 +36,15 @@ y = rdat$counts
 size_factors = rdat$size_factors
 log_size_factors = log(size_factors)
 
+# Check validity of input
+stopifnot(length(log_size_factors) == N)
+stopifnot(length(D) == N)
+stopifnot(length(y) == N)
+
 # Check whether compositional and/or spatial information is present; adjust model accordingly
 compositional = ("N_celltypes" %in% names(rdat))
 spatial = (rdat$car > 0)
+regional = ("region_list" %in% names(rdat))
 
 if (compositional) {
     K = rdat$N_celltypes
@@ -47,6 +53,24 @@ if (compositional) {
 
 # Create sparse adjacency matrix
 if (spatial) {
+    # Map cells to modeled spatial regions, if desired
+    if (regional) {
+        region_id = rdat$region_list
+    	R = max(region_id)
+
+        stopifnot(length(region_id) == N)
+
+        region_mapping = sparseMatrix(
+            i = seq_len(N),
+            j = region_id,
+            x = 1,
+            dims = c(N, R),
+            giveCsparse = TRUE
+        )
+        W_dims = c(R, R)
+    } else {
+        W_dims = c(N, N)
+    }
     i <- rdat$W_sparse[, 1]
     j <- rdat$W_sparse[, 2]
     
@@ -55,7 +79,7 @@ if (spatial) {
       i = c(i, j),
       j = c(j, i),
       x = 1,
-      dims = c(N, N),
+      dims = W_dims,
       giveCsparse = TRUE
     )
     
@@ -153,8 +177,13 @@ A = list(
 )
 
 if (spatial) {
-    effects$region_id = 1:N
-    A = c(A, list(1))       # maps region_id (length N) -> N observations (identity)
+    if (regional) {
+        effects$region_id = 1:R
+        A = c(A, list(region_mapping))      # maps region_id (length R) -> N observations
+    } else {
+        effects$region_id = 1:N
+        A = c(A, list(1))                   # maps region_id (length N) -> N observations (identity)
+    }
 }
 
 stk = inla.stack(
@@ -163,6 +192,21 @@ stk = inla.stack(
     effects = effects,
     tag = "est"
 )
+
+# Separate per-spot/cell estimates (defined as "est" in inla.stack) from fixed effects (betas)
+idx_est = inla.stack.index(stk, tag = "est")$data
+stopifnot(length(idx_est) == length(size_factors))
+
+cat("N:", N, "\n")
+cat("compositional:", compositional, "\n")
+cat("spatial:", spatial, "\n")
+if (spatial) {
+    cat("regional:", regional, "\n")
+    if (regional) { cat("R:", R, "\n") }
+}
+cat("length offset:", length(log_size_factors), "\n")
+cat("nrow A:", nrow(inla.stack.A(stk)), "\n")
+cat("length idx_est:", length(idx_est), "\n")
 
 ########################### DEFINE PRIORS ###########################
 
@@ -180,7 +224,15 @@ hyper_iid <- list(
   )
 )
 
-# PSI: (within LCAR.r)
+# PSI:
+hyper_besag = list(
+    prec = list(prior = "loggamma", param = c(1, 5e-4)),
+    lambda = list(prior = "gaussian", param = c(0, 0.45))
+)
+hyper_bym2 = list(
+    prec = list(prior = "pc.prec", param = c(1, 0.01)),
+    phi  = list(prior = "pc", param = c(0.5, 0.5))
+)
 
 ########################### BUILD & RUN MODEL ###########################
 
@@ -190,13 +242,28 @@ fml = y ~ 0 +
     hyper = list(
       prec = list(initial = log(beta_prec), fixed = TRUE)
     )
-  ) +
-  f(sample_id, model = "iid", hyper = hyper_iid)
+  )
 
+# Define CAR component in one of two ways:
+# 1. Regional: bym2 model mixes structured (inter-region) and unstructured (intra-region) with parameter "phi"
+# 2. Node-level: besagproper2 pure Leroux-style structured variation dependent on neighbors
 if (spatial) {
-    # Define Leroux CAR component
-    LCAR.model = inla.LCAR.model(W=W_sparse)
-    fml = update(fml, . ~ . + f(region_id, model = LCAR.model))
+    if (regional) {
+        fml = update(fml, . ~ . + f(region_id,
+                                    model='bym2',
+                                    graph=W_sparse,
+                                    hyper=hyper_bym2))        
+    } else {
+        fml = update(fml, . ~ . + f(region_id,
+                                    model='besagproper2',
+                                    graph=W_sparse,
+                                    hyper=hyper_besag))
+    }
+}
+# For node-level case, iid epsilon term handles node/cell-level variation; in regional case this is overparameterized
+# as the bym2 model allows for region-level iid effect
+if (!regional) {
+    fml = update(fml, . ~ . + + f(sample_id, model = "iid", hyper = hyper_iid))
 }
 
 fit_args = list(
@@ -258,10 +325,6 @@ if (draw_samples) {
 # Full plot-ready marginals for beta (now in marginals.random$beta)
 beta_marginals <- fit$marginals.random$beta
 names(beta_marginals) <- colnames(X)
-
-# Separate per-spot/cell estimates (defined as "est" in inla.stack) from fixed effects (betas)
-idx_est = inla.stack.index(stk, tag = "est")$data
-stopifnot(length(idx_est) == length(size_factors))
 
 # Full plot-ready marginals & joint posteriors for Beta; summary statistics for other marginals & hyperparameters
 res = list(
