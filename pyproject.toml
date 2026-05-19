@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "abcSplotch"
+dynamic = ["version", "dependencies", "readme"]
+description = "Approximate Bayesian model for cell-resolution spatial transcriptomics data"
+requires-python = ">=3.9"
+license = { text = "BSD-3-Clause" }
+authors = [
+  { name = "Aidan Daly", email = "adaly@nygenome.org" }
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: BSD License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering :: Bio-Informatics"
+]
+
+[project.urls]
+Homepage = "https://github.com/nygctech/abcSplotch"
+Repository = "https://github.com/nygctech/abcSplotch"
+Issues = "https://github.com/nygctech/abcSplotch/issues"
+
+[tool.setuptools]
+packages = ["splotch"]
+script-files = [
+  "bin/splotch_prepare_count_files",
+  "bin/splotch_generate_input_files"
+]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = { attr = "splotch.__version__" }
+dependencies = { file = ["requirements.txt"] }
+readme = { file = ["README.md"], content-type = "text/markdown" }

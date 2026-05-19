@@ -1,0 +1,9 @@
+include README.md
+include LICENSE
+include requirements.txt
+include environment.yml
+include bin/splotch_prepare_count_files
+include bin/splotch_generate_input_files
+recursive-include inla *.R *.r *.Rmd *.Rd
+recursive-include utils *.py *.R *.r
+recursive-include containers Dockerfile *.def *.sh
