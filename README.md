@@ -63,7 +63,7 @@ python -c "import splotch"
 
 ---
 
-# R-INLA / Apptainer Backend
+## R-INLA / Apptainer Backend
 
 The Bayesian inference backend relies on a containerized R-INLA environment distributed via Docker/Apptainer.
 
@@ -71,7 +71,7 @@ We recommend using the provided Apptainer image directly on HPC systems.
 
 ---
 
-## Building the Apptainer Image
+### Building the Apptainer Image
 
 ### Build the Docker image
 
@@ -97,7 +97,7 @@ This produces a portable, immutable Apptainer image suitable for HPC execution.
 
 ---
 
-## Optional: Create a Writable Sandbox
+### Optional: Create a Writable Sandbox
 
 For debugging or interactive development:
 
@@ -111,7 +111,7 @@ Note that sandbox containers are mutable and therefore less reproducible than `.
 
 ---
 
-## Running the R-INLA Backend
+### Running the R-INLA Backend
 
 Example:
 
@@ -127,7 +127,7 @@ The Python command-line tools can also be configured to launch the containerized
 
 ---
 
-# HPC Notes
+## HPC Notes
 
 Many HPC environments prohibit Docker execution directly on compute nodes. The recommended workflow is therefore:
 
@@ -139,47 +139,3 @@ Many HPC environments prohibit Docker execution directly on compute nodes. The r
 The `.sif` image is self-contained and reproducible across systems supporting Apptainer/Singularity.
 
 ---
-
-# Updating the Environment
-
-To update dependencies after modifying `environment.yml`:
-
-```bash
-mamba env update -f environment.yml --prune
-```
-
----
-
-# Troubleshooting
-
-## Pip attempts to compile matplotlib / NumPy
-
-If installation fails while compiling scientific packages:
-
-- ensure compiled packages are listed under Conda dependencies rather than `pip:`
-- recreate the environment from scratch
-
-```bash
-mamba env remove -n abcsplotch
-mamba env create -f environment.yml
-```
-
-## rpy2 cannot locate R
-
-Verify that the Conda environment contains `r-base`:
-
-```bash
-which R
-python -c "import rpy2.robjects as ro; print(ro.r('R.version.string'))"
-```
-
-## Apptainer cannot find bind-mounted files
-
-Explicitly bind host directories:
-
-```bash
-apptainer exec \
-    --bind /path/to/data:/data \
-    abcsplotch-rinla_latest.sif \
-    bash
-```
