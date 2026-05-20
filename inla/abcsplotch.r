@@ -1,22 +1,54 @@
 library(INLA)
 library(rstan)
 library(Matrix)
-
-source("LCAR.r")
+library(argparse)
 
 script_start_time <- Sys.time()
 
 ########################### READ INPUT DATA ###########################
 
-args <- commandArgs(trailingOnly = TRUE)
+library(argparse)
 
-if (length(args) < 2) {
-  stop("Usage: Rscript model_script.R <input_rdat_path> <output_directory> [TRUE/FALSE (sample posterior)]")
-}
+parser <- ArgumentParser(
+  description = "Run abcSplotch model with INLA inference."
+)
 
-input_path  <- args[1]
-output_root <- args[2]
-draw_samples <- if (length(args) > 2) { tolower(args[4]) %in% c("true", "t", "1", "yes") } else FALSE
+# Positional arguments
+parser$add_argument(
+  "input_rdat_path",
+  type = "character",
+  help = "Path to input .rdat file"
+)
+
+parser$add_argument(
+  "output_directory",
+  type = "character",
+  help = "Directory for model outputs"
+)
+
+# Optional arguments
+parser$add_argument(
+  "--draw-samples",
+  action = "store_true",
+  default = FALSE,
+  help = "Draw posterior samples"
+)
+
+parser$add_argument(
+  "--regional-precision",
+  type = "double",
+  default = log(200),
+  help = "If provided, fixes BYM2 regional precision to this value (default: log(200))"
+)
+
+# Parse arguments
+args <- parser$parse_args()
+
+# Assign variables
+input_path <- args$input_rdat_path
+output_root <- args$output_directory
+draw_samples <- args$draw_samples
+regional_precision <- args$regional_precision
 
 # Assumes pattern like: inputs/0/data_1.R
 base_name <- basename(input_path)
@@ -161,6 +193,13 @@ if (compositional) {
     }))
 }
 
+# Drop any unused beta columns (e.g., unobserved combinations of condition, cell type):
+nonzero_cols <- Matrix::colSums(abs(X)) > 0
+cat("Dropping", sum(!nonzero_cols), "all-zero beta columns\n")
+X <- X[, nonzero_cols, drop = FALSE]
+X <- Matrix::drop0(X)
+p <- ncol(X)
+
 # Tell INLA how to map data to parameters
 # - inla.stack is a fancy DataFrame that can handle different-dimension input
 # - Our "betas" are length p (conds * mrois * celltypes) while spot_ids, scale_factors are length N
@@ -225,13 +264,24 @@ hyper_iid <- list(
 )
 
 # PSI:
+# LCAR only - for cell/spot-level cases where iid error added separately (epsilon)
 hyper_besag = list(
-    prec = list(prior = "loggamma", param = c(1, 5e-4)),
+    prec   = list(prior = "loggamma", param = c(1, 5e-4)),
     lambda = list(prior = "gaussian", param = c(0, 0.45))
 )
-hyper_bym2 = list(
-    prec = list(prior = "pc.prec", param = c(1, 0.01)),
-    phi  = list(prior = "pc", param = c(0.5, 0.5))
+
+# LCAR+iid - for region-level cases
+hyper_bym2 <- list(
+  # precision
+  theta1 = list(
+    initial = regional_precision,
+    fixed = TRUE
+  ),
+  # phi (0=intraregion iid, 1=fully spatial)
+  theta2 = list(
+    prior = "pc",
+    param = c(0.5, 0.8)
+  )
 )
 
 ########################### BUILD & RUN MODEL ###########################
