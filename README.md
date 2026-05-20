@@ -2,12 +2,11 @@
 Approximate Bayesian inference of spatial cellular gene expression conditioned on sample covariates. 
 
 ## Features:
-- Outputs denoised maps of spatial gene expression
-- Computes shared effects across cell- or spot-level labels
-- Quantifies population-level differential expression trends via model selection
+- Uses generalized linear model to denoise gene expression, disentangling effects of cell type, sample covariate, and local spatial autcorrelation
+- Quantifies cohort-level differential expression across sample covariates and/or cell types 
+- Efficient inference via integrated nested Laplace approximation (INLA) scales to tens of millions of spots/cells
 - Compatible with Visium HD, Visium v1/v2, and original STv1
 - Enables deconvolution of multi-cellular data (Visium v1/v2, STv1) via per-spot cellular composition estimates
-- Efficient inference via integrated nested Laplace approximation (INLA)
 
 ![abcSplotch model](abcSplotch.png)
 
