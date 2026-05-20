@@ -9,6 +9,8 @@ Approximate Bayesian inference of spatial cellular gene expression conditioned o
 - Enables deconvolution of multi-cellular data (Visium v1/v2, STv1) via per-spot cellular composition estimates
 - Efficient inference via integrated nested Laplace approximation (INLA)
 
+![abcSplotch model](abcSplotch.png)
+
 ## Installation
 
 ### 1. Clone the repository
