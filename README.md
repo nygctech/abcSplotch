@@ -136,8 +136,8 @@ apptainer exec \
     abcsplotch-rinla.sandbox \              # or abcsplotch-rinla.sandbox
     Rscript abcSplotch/inla/abcsplotch.R \
     input.rdat \
-    output_dir
-    [--draw-samples]                        # to sample from the joint posterior (expensive)
+    output_dir \
+    [--draw-samples] \                      # to sample from the joint posterior (expensive)
     [--regional-precision prec]             # precision for regional bmy2 model (between log(100) and log(400))
 ```
 
