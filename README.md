@@ -80,8 +80,6 @@ We recommend using the provided Apptainer image directly on HPC systems.
 
 ---
 
-### Building the Apptainer Image
-
 ### Build the Docker image
 
 From the `containers/` directory:
@@ -94,7 +92,7 @@ docker build -t abcsplotch-rinla:latest .
 
 ---
 
-### Convert Docker image to Apptainer `.sif`
+### Build the Apptainer image
 
 ```bash
 apptainer build \
@@ -126,10 +124,12 @@ Example:
 
 ```bash
 apptainer exec \
-    abcsplotch-rinla_latest.sif \
-    Rscript /opt/abcSplotch/scripts/run_model.R \
+    abcsplotch-rinla.sandbox \              # or abcsplotch-rinla.sandbox
+    Rscript abcSplotch/inla/abcsplotch.R \
     input.rdat \
     output_dir
+    [--draw-samples]                        # to sample from the joint posterior (expensive)
+    [--regional-precision prec]             # precision for regional bmy2 model (between log(100) and log(400))
 ```
 
 The Python command-line tools can also be configured to launch the containerized backend automatically.
