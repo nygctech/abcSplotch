@@ -133,7 +133,7 @@ Example:
 
 ```bash
 apptainer exec \
-    abcsplotch-rinla.sandbox \              # or abcsplotch-rinla.sandbox
+    abcsplotch-rinla.sif \              # or abcsplotch-rinla.sandbox
     Rscript abcSplotch/inla/abcsplotch.R \
     input.rdat \
     output_dir \
