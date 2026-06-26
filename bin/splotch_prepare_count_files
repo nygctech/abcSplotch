@@ -12,6 +12,8 @@ import pandas as pd
 import scipy.io
 import csv
 import gzip
+import anndata as ad 
+from scipy import sparse
 from pathlib import Path
 
 import splotch
@@ -127,6 +129,52 @@ def prepare_count_files(count_files, frames, suffix='.unified.tsv', minimum_dete
     else:
       write_unified_hdf5(filename+suffix,result[filename])
 
+def prepare_count_files_celllular(data_path, suffix='.unified.h5ad', minimum_detection_rate=0.01,):
+
+
+    unified_adata_list = []
+    unified_names = []
+    for file in os.listdir(data_path):
+        adata = ad.read(os.path.join(data_path, file))
+        unified_adata_list.append(adata)
+        unified_names.append(file.split('.')[0])
+
+
+    for adata_obj, name in zip(unified_adata_list, unified_names):
+        adata_obj.obs['sample_id'] = name
+
+
+
+    adata_unified = ad.concat(unified_adata_list, join='outer')
+
+
+    X = adata_unified.X
+    n_cells = X.shape[0]
+    if sparse.issparse(X):
+        gene_detect_counts = (X > 0).sum(axis=0).A1
+    else:
+        gene_detect_counts = (X > 0).sum(axis=0)
+
+    gene_detect_rate = gene_detect_counts / n_cells
+
+    ## Use lower minimum detection rate for this type of data
+    gene_mask = gene_detect_rate >= minimum_detection_rate
+    logging.info('We keep %d genes after discarding the lowly expressed genes (detected in less than %.2f%% of the ST spots)'%(gene_mask.sum(),100.0*minimum_detection_rate))
+
+    adata_filt = adata_unified[:, gene_mask].copy()
+    logging.info(('The median sequencing depth across the ST spots is %d'%(numpy.median(adata_filt.X.sum(axis=1).A1))))
+    keep_obs = ['array_row', 'array_col', 'region_celltype', 'sample_id']
+    adata_filt.obs = adata_filt.obs[keep_obs].copy()
+    adata_filt.layers = {}
+    adata_filt.uns = {}
+    adata_filt.obsm = {}
+
+    for name in unified_names:
+        subset_adata = adata_filt[adata_filt.obs['sample_id'] == name].copy()
+        subset_adata.write(f'{name+suffix}')
+    
+    return adata_filt, numpy.median(adata_filt.X.sum(axis=1).A1)
+
 if __name__ == '__main__':
 
   parser = argparse.ArgumentParser(
@@ -147,6 +195,8 @@ if __name__ == '__main__':
                       help='count data in Visium format (default)')
   parser.add_argument('-B','--hd-binning', type=str, required=False, default=None,
                       help='name of binning to use (Visium HD only)')
+  parser.add_argument('-C','--hd_cellular', required=False, default=False,
+                      help='Use cell based segmentation (Visium HD only)')
   parser.add_argument('-S','--st-v1', action='store_true', required=False,
                       help='count data in STv1 format')
 
@@ -180,7 +230,9 @@ if __name__ == '__main__':
   else:
     if options.hd_binning is None:
       visium_prepare_count_files(options.count_data, options.suffix, options.minimum_detection_rate)
-    else:
+    elif not options.hd_cellular:
       visium_prepare_count_files_hd(options.count_data, options.suffix, options.minimum_detection_rate, options.hd_binning)
+    else:
+      prepare_count_files_celllular(options.count_data, options.suffix, options.minimum_detection_rate, options.hd_binning)
 
   sys.exit(0)
