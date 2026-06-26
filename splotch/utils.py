@@ -328,15 +328,18 @@ def get_variable_mappings(count_files,metadata,
   
   return level_mappings,last_level_identifiers,conditions_to_variables
 
-def n_elements_per_level(node,n,tmp=[]):
+def n_elements_per_level(node,n,tmp=None):
+  if tmp is None:
+    tmp = [0]*10
   tmp[n] += len(node)
   if not isinstance(node,dict):
-      return
+      return tmp
   for key, item in node.items():
     if isinstance(item,dict):
       n_elements_per_level(item,n+1,tmp)
     else:
       tmp[n+1] += len(item)
+  return tmp
 
 def watershed_tissue_sections(unique_label,labels,max_label):
   tmp_labels = 1*labels
