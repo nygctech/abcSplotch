@@ -1,5 +1,14 @@
 # abcSplotch
-Approximate Bayesian inference of spatial cellular gene expression conditioned on covariates of interest
+Approximate Bayesian inference of spatial cellular gene expression conditioned on sample covariates. 
+
+## Features:
+- Uses generalized linear model to denoise gene expression, disentangling effects of cell type, sample covariate, and local spatial autcorrelation
+- Quantifies cohort-level differential expression across sample covariates and/or cell types 
+- Efficient inference via integrated nested Laplace approximation (INLA) scales to tens of millions of spots/cells
+- Compatible with Visium HD, Visium v1/v2, and original STv1
+- Enables deconvolution of multi-cellular data (Visium v1/v2, STv1) via per-spot cellular composition estimates
+
+![abcSplotch model](abcSplotch.png)
 
 ## Installation
 
@@ -12,13 +21,13 @@ cd abcSplotch
 
 ---
 
-## Python Environment Installation
+### 2. Python Environment Installation
 
 The preprocessing and downstream analysis tools are distributed as a Python package and are intended to run inside a Conda/Mamba environment.
 
 We strongly recommend using `mamba` (or `micromamba`) with the `conda-forge` channel.
 
-### Create the environment
+Create the environment:
 
 ```bash
 mamba env create -f environment.yml
@@ -32,7 +41,7 @@ conda activate abcsplotch
 
 ---
 
-## Install the Python Package
+### 3. Install the Python Package
 
 Install the repository in editable mode:
 
@@ -48,7 +57,7 @@ This will:
 
 The `--no-deps` flag prevents `pip` from attempting to reinstall scientific dependencies already managed by Conda/Mamba.
 
-### Verify installation
+### 4. Verify installation
 
 ```bash
 splotch_prepare_count_files --help
@@ -63,17 +72,22 @@ python -c "import splotch"
 
 ---
 
-# R-INLA / Apptainer Backend
+## R-INLA / Apptainer Backend
 
 The Bayesian inference backend relies on a containerized R-INLA environment distributed via Docker/Apptainer.
 
 We recommend using the provided Apptainer image directly on HPC systems.
 
+Many HPC environments prohibit Docker execution directly on compute nodes. The recommended workflow is therefore:
+
+1. Build Docker image locally or on a build node (must have x86 architecture)
+2. Convert to Apptainer `.sif`
+3. Transfer `.sif` to the cluster
+4. Execute with `apptainer exec`
+
 ---
 
-## Building the Apptainer Image
-
-### Build the Docker image
+### 1. Build the Docker image
 
 From the `containers/` directory:
 
@@ -85,7 +99,7 @@ docker build -t abcsplotch-rinla:latest .
 
 ---
 
-### Convert Docker image to Apptainer `.sif`
+### 2. Build the Apptainer image
 
 ```bash
 apptainer build \
@@ -93,11 +107,11 @@ apptainer build \
     docker-daemon://abcsplotch-rinla:latest
 ```
 
-This produces a portable, immutable Apptainer image suitable for HPC execution.
+This produces a portable, immutable Apptainer image suitable for HPC execution. The `.sif` image is self-contained and reproducible across systems supporting Apptainer/Singularity.
 
 ---
 
-## Optional: Create a Writable Sandbox
+### Optional: Create a Writable Sandbox
 
 For debugging or interactive development:
 
@@ -111,75 +125,23 @@ Note that sandbox containers are mutable and therefore less reproducible than `.
 
 ---
 
-## Running the R-INLA Backend
+## Data preprocessing
+
+## Model execution
 
 Example:
 
 ```bash
 apptainer exec \
-    abcsplotch-rinla_latest.sif \
-    Rscript /opt/abcSplotch/scripts/run_model.R \
+    abcsplotch-rinla.sif \              # or abcsplotch-rinla.sandbox
+    Rscript abcSplotch/inla/abcsplotch.R \
     input.rdat \
-    output_dir
+    output_dir \
+    [--draw-samples] \                      # to sample from the joint posterior (expensive)
+    [--regional-precision prec]             # precision for regional bmy2 model (between log(100) and log(400))
 ```
 
-The Python command-line tools can also be configured to launch the containerized backend automatically.
+## Downstream analysis & visualization
+
 
 ---
-
-# HPC Notes
-
-Many HPC environments prohibit Docker execution directly on compute nodes. The recommended workflow is therefore:
-
-1. Build Docker image locally or on a build node (must have x86 architecture)
-2. Convert to Apptainer `.sif`
-3. Transfer `.sif` to the cluster
-4. Execute with `apptainer exec`
-
-The `.sif` image is self-contained and reproducible across systems supporting Apptainer/Singularity.
-
----
-
-# Updating the Environment
-
-To update dependencies after modifying `environment.yml`:
-
-```bash
-mamba env update -f environment.yml --prune
-```
-
----
-
-# Troubleshooting
-
-## Pip attempts to compile matplotlib / NumPy
-
-If installation fails while compiling scientific packages:
-
-- ensure compiled packages are listed under Conda dependencies rather than `pip:`
-- recreate the environment from scratch
-
-```bash
-mamba env remove -n abcsplotch
-mamba env create -f environment.yml
-```
-
-## rpy2 cannot locate R
-
-Verify that the Conda environment contains `r-base`:
-
-```bash
-which R
-python -c "import rpy2.robjects as ro; print(ro.r('R.version.string'))"
-```
-
-## Apptainer cannot find bind-mounted files
-
-Explicitly bind host directories:
-
-```bash
-apptainer exec \
-    --bind /path/to/data:/data \
-    abcsplotch-rinla_latest.sif \
-    bash
-```
