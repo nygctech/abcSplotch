@@ -67,6 +67,7 @@ D = rdat$D
 y = rdat$counts
 size_factors = rdat$size_factors
 log_size_factors = log(size_factors)
+beta_priors = all(c("beta_prior_mean", "beta_prior_std") %in% names(rdat))
 
 # Check validity of input
 stopifnot(length(log_size_factors) == N)
@@ -124,14 +125,16 @@ if (spatial) {
 }
 
 # Derive spot-level labeling for each covariate group
-if (rdat$N_level_3 > 0) {
+if ("N_level_3" %in% names(rdat) && rdat$N_level_3 > 0) {
     level_3 = rep(rdat$tissue_mapping, times = rdat$N_spots)
     level_2 = rdat$level_3_mapping[level_3]
     level_1 = rdat$level_2_mapping[level_2]
-} else if (rdat$N_level_2 > 0) {
+} else if ("N_level_2" %in% names(rdat) && rdat$N_level_2 > 0) {
     level_2 = rep(rdat$tissue_mapping, times = rdat$N_spots)
     level_1 = rdat$level_2_mapping[level_2]
 } else {
+    stopifnot("N_level_1" %in% names(rdat))
+    stopifnot(rdat$N_level_1 > 0)
     level_1 = rep(rdat$tissue_mapping, times = rdat$N_spots)
 }
 
@@ -250,8 +253,33 @@ cat("length idx_est:", length(idx_est), "\n")
 ########################### DEFINE PRIORS ###########################
 
 # BETA:
-beta_prec = 0.25   # SD = 2, as in Stan formulation
-# TODO: allow modulation of beta_mean and beta_prec?
+if (beta_priors) {
+    mu = rdat$beta_prior_mean
+    sigma = rdat$beta_prior_std
+    
+    if (compositional) {
+        stopifnot(length(mu)==K)
+        stopifnot(length(sigma)==K)
+        b_idx = as.integer(sub(".*_k([0-9]+)$", "\\1", colnames(X)))
+    } else {
+        stopifnot(length(mu)==max(D))
+        stopifnot(length(sigma)==max(D))
+        b_idx = as.integer(sub(".*_m([0-9]+)$", "\\1", colnames(X)))
+    }
+    stopifnot(all(sigma > 0))
+    stopifnot(!any(is.na(b_idx)))
+    
+    beta_mean = mu[b_idx]
+    beta_prec = 1 / sigma[b_idx]^2
+
+    Q_beta <- Matrix::Diagonal(
+        n = p,
+        x = beta_prec
+    )
+    beta_prior_offset <- as.vector(X %*% beta_mean)
+} else {
+    beta_prec = 0.25   # SD = 2, as in Stan formulation
+}
 
 # EPSILON:
 # In Stan implementation, hyperprior on SD of epsilon is HalfNormal(0,0.3)
@@ -287,12 +315,24 @@ hyper_bym2 <- list(
 ########################### BUILD & RUN MODEL ###########################
 
 # Formula: no intercept; offset passed later to fit; beta is a latent coefficient vector
-fml = y ~ 0 +
-  f(beta, model = "iid",
-    hyper = list(
-      prec = list(initial = log(beta_prec), fixed = TRUE)
-    )
-  )
+if (beta_priors) {
+    fml = y ~ 0 +
+      f(beta,
+        model = "generic0",
+        Cmatrix = Q_beta,
+        constr = FALSE,
+        hyper = list(
+          prec = list(initial = 0, fixed = TRUE)
+        )
+      )    
+} else {
+    fml = y ~ 0 +
+      f(beta, model = "iid",
+        hyper = list(
+          prec = list(initial = log(beta_prec), fixed = TRUE)
+        )
+      )
+}
 
 # Define CAR component in one of two ways:
 # 1. Regional: bym2 model mixes structured (inter-region) and unstructured (intra-region) with parameter "phi"
@@ -324,6 +364,9 @@ fit_args = list(
     control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE, config = TRUE),
     offset = log_size_factors
 )
+if (beta_priors) { 
+    fit_args$offset = log_size_factors + beta_prior_offset
+}
 fit = do.call(INLA::inla, fit_args)
 
 # Quick check
@@ -412,6 +455,33 @@ if (spatial) {
 }
 if (draw_samples) {
     res$beta_samples = beta_samples
+}
+if (beta_priors) {
+    # INLA only tracks centered versions; need to add offset before saving:
+    res$beta_marginals <- Map(
+        function(marg, shift) {
+            INLA::inla.tmarginal(
+                fun = function(x) x + shift,
+                marginal = marg
+            )
+        },
+        beta_marginals,
+        beta_mean
+    )
+    # Make sure INLA doesn't use too many grid points to store marginals, keeping file size manageable
+    # (INLA is compact with model="iid" (around 40 points per beta), but not with model="generic0" (potentially thousands)) 
+    res$beta_marginals <- lapply(res$beta_marginals, function(m) {
+        idx <- unique(round(seq(1, nrow(m), length.out = min(200, nrow(m)))))
+        m[idx, , drop = FALSE]
+    })
+    
+    res$beta_summary$mean <- beta_summary$mean + beta_mean
+    res$beta_summary$`0.025quant` <- beta_summary$`0.025quant` + beta_mean
+    res$beta_summary$`0.5quant`   <- beta_summary$`0.5quant`   + beta_mean
+    res$beta_summary$`0.975quant` <- beta_summary$`0.975quant` + beta_mean
+    if (draw_samples) { 
+        res$beta_samples = beta_samples + beta_mean 
+    }
 }
 
 # Summaries of model evaluation criteria: DIC, WAIC, CPO
