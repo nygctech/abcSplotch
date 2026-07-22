@@ -2,6 +2,9 @@ library(INLA)
 library(rstan)
 library(Matrix)
 library(argparse)
+source("design.r")
+source("summary.r")
+source("sampling.r")
 
 script_start_time <- Sys.time()
 
@@ -68,6 +71,7 @@ y = rdat$counts
 size_factors = rdat$size_factors
 log_size_factors = log(size_factors)
 beta_priors = all(c("beta_prior_mean", "beta_prior_std") %in% names(rdat))
+levels = rdat$N_levels
 
 # Check validity of input
 stopifnot(length(log_size_factors) == N)
@@ -140,106 +144,96 @@ if ("N_level_3" %in% names(rdat) && rdat$N_level_3 > 0) {
 
 ########################### CONSTRUCT DESIGN MATRIX ###########################
 
-# Make factors for condition group and MROI
-cond_fac = factor(level_1)
-mroi_fac = factor(D)
+beta_designs <- list()
 
-# Combine condition + MROI into a single group index
-g_fac = interaction(cond_fac, mroi_fac, drop = TRUE)  # levels correspond to (cond, MROI) combos -- e.g., "1.2"
-g_id = as.integer(g_fac)
-G = nlevels(g_fac)
-
-if (compositional) {
-  stopifnot(nrow(E) == N, ncol(E) == K)
-
-  # For each row i, nonzeros are in columns (g_id[i]-1)*K + 1..K with values E[i,]
-  i_idx = rep(seq_len(N), each = K)                        # length N*K
-  j_idx = (rep(g_id, each = K) - 1L) * K + rep(seq_len(K), times = N)
-  x_val = as.numeric(t(E))                                 # row-wise flatten: E[1,], E[2,], ...
-
-  X = sparseMatrix(
-    i = i_idx,
-    j = j_idx,
-    x = x_val,
-    dims = c(N, G * K),
-    giveCsparse = TRUE
-  )
-
-} else {
-  # One-hot: row i has a single 1 in column g_id[i]
-  X = sparseMatrix(
-    i = seq_len(N),
-    j = g_id,
-    x = 1,
-    dims = c(N, G),
-    giveCsparse = TRUE
-  )
-}
-
-X = drop0(X)  # optional cleanup
-
-# Make readable coefficient names: beta[g,k] where g encodes (condition, MROI)
-g_levels = levels(g_fac)  # by default, strings like "1.2"
-parts = strsplit(g_levels, ".", fixed = TRUE)
-c_idx = match(vapply(parts, `[`, "", 1), levels(cond_fac))
-m_idx = match(vapply(parts, `[`, "", 2), levels(mroi_fac))
-
-stopifnot(length(c_idx) == G, length(m_idx) == G)  # sanity check; c_idx and m_idx should both be equal to number of conditions
-
-if (compositional) {
-    colnames(X) <- as.vector(sapply(seq_len(G), function(g) {
-        paste0("beta_c", c_idx[g], "_m", m_idx[g], "_k", seq_len(K))
-    }))
-} else {
-    colnames(X) <- as.vector(sapply(seq_len(G), function(g) {
-        paste0("beta_c", c_idx[g], "_m", m_idx[g])
-    }))
-}
-
-# Drop any unused beta columns (e.g., unobserved combinations of condition, cell type):
-nonzero_cols <- Matrix::colSums(abs(X)) > 0
-cat("Dropping", sum(!nonzero_cols), "all-zero beta columns\n")
-X <- X[, nonzero_cols, drop = FALSE]
-X <- Matrix::drop0(X)
-p <- ncol(X)
-
-# Tell INLA how to map data to parameters
-# - inla.stack is a fancy DataFrame that can handle different-dimension input
-# - Our "betas" are length p (conds * mrois * celltypes) while spot_ids, scale_factors are length N
-p = ncol(X)
-
-effects = list(
-    beta = 1:p,
-    sample_id = 1:N
+beta_designs[[1]] <- make_level_design(
+    level_labels = level_1,
+    D = D,
+    E = E,
+    compositional = compositional,
+    K = K,
+    N = N,
+    hierarchy_level = 1L
 )
 
-A = list(
-    X,                 # maps beta (length p) -> N observations
-    1                  # maps sample_id (length N) -> N observations (identity)
+if (levels >= 2) {
+    beta_designs[[2]] <- make_level_design(
+        level_labels = level_2,
+        D = D,
+        E = E,
+        compositional = compositional,
+        K = K,
+        N = N,
+        hierarchy_level = 2L
+    )
+}
+
+if (levels == 3) {
+    beta_designs[[3]] <- make_level_design(
+        level_labels = level_3,
+        D = D,
+        E = E,
+        compositional = compositional,
+        K = K,
+        N = N,
+        hierarchy_level = 3L
+    )
+}
+
+n_hierarchy_levels <- length(beta_designs)
+
+stopifnot(n_hierarchy_levels >= 1L)
+stopifnot(
+    all(vapply(
+        beta_designs,
+        function(x) nrow(x$X) == N,
+        logical(1)
+    ))
 )
 
+# Construct hierarchy-level beta/deviation effects and mappings.
+effects <- list()
+A <- list()
+
+for (l in seq_along(beta_designs)) {
+    design <- beta_designs[[l]]
+
+    effects[[design$latent_name]] <- seq_len(design$p)
+    A[[design$latent_name]] <- design$X
+}
+
+# Observation-level iid component.
+effects$sample_id <- seq_len(N)
+A$sample_id <- 1
+
+# Optional spatial component.
 if (spatial) {
     if (regional) {
-        effects$region_id = 1:R
-        A = c(A, list(region_mapping))      # maps region_id (length R) -> N observations
+        effects$region_id <- seq_len(R)
+        A$region_id <- region_mapping
     } else {
-        effects$region_id = 1:N
-        A = c(A, list(1))                   # maps region_id (length N) -> N observations (identity)
+        effects$region_id <- seq_len(N)
+        A$region_id <- 1
     }
 }
 
-stk = inla.stack(
+stopifnot(length(A) == length(effects))
+stopifnot(identical(names(A), names(effects)))
+
+stk <- inla.stack(
     data = list(y = y),
     A = A,
     effects = effects,
     tag = "est"
 )
 
-# Separate per-spot/cell estimates (defined as "est" in inla.stack) from fixed effects (betas)
-idx_est = inla.stack.index(stk, tag = "est")$data
+idx_est <- inla.stack.index(stk, tag = "est")$data
+
+stopifnot(length(idx_est) == N)
 stopifnot(length(idx_est) == length(size_factors))
 
 cat("N:", N, "\n")
+cat("levels:", levels, "\n")
 cat("compositional:", compositional, "\n")
 cat("spatial:", spatial, "\n")
 if (spatial) {
@@ -281,6 +275,15 @@ if (beta_priors) {
     beta_prec = 0.25   # SD = 2, as in Stan formulation
 }
 
+# BETA LEVELS 2-3: 
+# Additional variance on top of level 1 follows Half-Normal(0,1) in Splotch;
+# this adapts for the log-precision speficiation employed by INLA
+half_normal_sd1_prior <- "
+expression:
+    logdens = -0.5 * exp(-theta) - 0.5 * theta;
+    return(logdens);
+"
+
 # EPSILON:
 # In Stan implementation, hyperprior on SD of epsilon is HalfNormal(0,0.3)
 # These PC prior settings make sure that SD of epsilon rarely exceeds what we'd expect from this
@@ -317,7 +320,7 @@ hyper_bym2 <- list(
 # Formula: no intercept; offset passed later to fit; beta is a latent coefficient vector
 if (beta_priors) {
     fml = y ~ 0 +
-      f(beta,
+      f(beta_l1,
         model = "generic0",
         Cmatrix = Q_beta,
         constr = FALSE,
@@ -327,11 +330,36 @@ if (beta_priors) {
       )    
 } else {
     fml = y ~ 0 +
-      f(beta, model = "iid",
+      f(beta_l1, model = "iid",
         hyper = list(
           prec = list(initial = log(beta_prec), fixed = TRUE)
         )
       )
+}
+
+# Additional hierarchical levels are supported through added variance ("delta") terms
+if (levels >= 2L) {
+    fml <- update(
+        fml,
+        . ~ . +
+            f(
+                delta_l2,
+                model = "iid",
+                hyper = half_normal_sd1_prior
+            )
+    )
+}
+
+if (levels >= 3L) {
+    fml <- update(
+        fml,
+        . ~ . +
+            f(
+                delta_l3,
+                model = "iid",
+                hyper = half_normal_sd1_prior
+            )
+    )
 }
 
 # Define CAR component in one of two ways:
@@ -356,149 +384,228 @@ if (!regional) {
     fml = update(fml, . ~ . + + f(sample_id, model = "iid", hyper = hyper_iid))
 }
 
+# Compute "effective" level 2 and 3 betas by combining level 1 with modeled offsets
+# (Need to specify that these combinations are modeled *before* fitting!)
+effective_beta_def <- make_effective_beta_lincombs(
+    beta_designs = beta_designs,
+    rdat = rdat,
+    n_hierarchy_levels = n_hierarchy_levels
+)
+effective_beta_lincombs <- effective_beta_def$lincombs
+effective_beta_metadata <- effective_beta_def$metadata
+
 fit_args = list(
     formula = fml,
     family = "nbinomial",
     data = inla.stack.data(stk),
     control.predictor = list(A = inla.stack.A(stk), compute = TRUE),
     control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE, config = TRUE),
-    offset = log_size_factors
+    offset = log_size_factors,
+    lincomb = effective_beta_lincombs
 )
 if (beta_priors) { 
     fit_args$offset = log_size_factors + beta_prior_offset
 }
 fit = do.call(INLA::inla, fit_args)
 
-# Quick check
-beta_summary = fit$summary.random$beta
-beta_summary$coef = colnames(X)
-print(beta_summary[1:min(10, nrow(beta_summary)), ])
+# Quick check of level-1 beta terms
+beta_l1_summary <- fit$summary.random$beta_l1
+beta_l1_summary$coef <- colnames(beta_designs[[1]]$X)
+
+stopifnot(nrow(beta_l1_summary) == ncol(beta_designs[[1]]$X))
+
+print(beta_l1_summary[seq_len(min(10, nrow(beta_l1_summary))), ])
 print(fit$summary.hyperpar)
 
 ########################### SAMPLE JOINT POSTERIOR ###########################
 
-# Expensive; and not yielding comparable results to BF testing on Bayesian posteriors.
+# Expensive; primarily retained for analyses requiring the covariance
+# among hierarchical beta components
+beta_posterior_samples <- NULL
+
 if (draw_samples) {
-    # Sample joint posterior, only saving results from betas:
-    cat("Sampling joint posterior from computed marginals...\n")
-    
-    # Chunking reduces peak memory usage, as INLA generates full posterior then returns subset
-    n_total <- 1000
-    chunk_size <- 50
-    
-    beta_samples <- matrix(NA_real_, n_total, p)
-    
-    starts <- seq(1, n_total, by = chunk_size)
-    
-    for (s in starts) {
-      m <- min(chunk_size, n_total - s + 1)
-    
-      samp_chunk <- inla.posterior.sample(
-        n = m,
-        result = fit,
-        selection = list(beta = 1:p),
-        add.names = FALSE
-      )
-    
-      beta_samples[s:(s + m - 1), ] <- t(vapply(
-        samp_chunk,
-        function(z) as.numeric(z$latent[, 1]),
-        numeric(p)
-      ))
-    
-      rm(samp_chunk)
-      gc()
-    }
-    
-    colnames(beta_samples) <- colnames(X)
+    beta_posterior_samples <- sample_hierarchical_betas(
+        fit = fit,
+        beta_designs = beta_designs,
+        effective_beta_metadata = effective_beta_metadata,
+        n_hierarchy_levels = n_hierarchy_levels,
+        n_total = 1000L,
+        chunk_size = 50L,
+        beta_priors = beta_priors,
+        beta_mean = if (beta_priors) beta_mean else NULL
+    )
 }
 
 ########################### SAVE RESULTS ###########################
 
-# Full plot-ready marginals for beta (now in marginals.random$beta)
-beta_marginals <- fit$marginals.random$beta
-names(beta_marginals) <- colnames(X)
-
-# Full plot-ready marginals & joint posteriors for Beta; summary statistics for other marginals & hyperparameters
-res = list(
-  # store the controls used (so later scripts know what was requested)
-  control = list(
-    predictor = list(compute = TRUE),
-    compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE, config = TRUE)
-  ),
-
-  # summaries
-  beta_summary  = beta_summary,
-  hyper_summary  = fit$summary.hyperpar,
-
-  log_lambda = list(
-      mean = fit$summary.linear.predictor$mean[idx_est],
-      sd = fit$summary.linear.predictor$sd[idx_est]
-  ),
-  lambda = list(
-      mean = fit$summary.fitted.values$mean[idx_est] / size_factors,
-      sd = fit$summary.fitted.values$sd[idx_est] / size_factors
-  ),
-  epsilon = list(
-      mean = fit$summary.random$sample_id$mean,
-      sd = fit$summary.random$sample_id$sd
-  ),
-
-  # keep only beta marginals to keep file size down
-  beta_marginals = beta_marginals
+raw_beta <- collect_raw_beta_results(
+    fit = fit,
+    beta_designs = beta_designs
 )
+
+effective_beta <- collect_effective_beta_results(
+    fit = fit,
+    effective_beta_metadata = effective_beta_metadata,
+    n_hierarchy_levels = n_hierarchy_levels
+)
+
+# Apply level-1 prior-mean offsets.
+if (beta_priors) {
+    raw_beta$summaries$beta_l1 <- shift_summary(
+        raw_beta$summaries$beta_l1,
+        beta_mean
+    )
+
+    raw_beta$marginals$beta_l1 <- shift_marginals(
+        raw_beta$marginals$beta_l1,
+        beta_mean
+    )
+
+    if (n_hierarchy_levels >= 2L) {
+        shift_l2 <- beta_mean[
+            effective_beta_metadata[[2]]$parent_l1_col
+        ]
+
+        effective_beta$summaries$beta_l2 <- shift_summary(
+            effective_beta$summaries$beta_l2,
+            shift_l2
+        )
+
+        effective_beta$marginals$beta_l2 <- shift_marginals(
+            effective_beta$marginals$beta_l2,
+            shift_l2
+        )
+    }
+
+    if (n_hierarchy_levels >= 3L) {
+        shift_l3 <- beta_mean[
+            effective_beta_metadata[[3]]$parent_l1_col
+        ]
+
+        effective_beta$summaries$beta_l3 <- shift_summary(
+            effective_beta$summaries$beta_l3,
+            shift_l3
+        )
+
+        effective_beta$marginals$beta_l3 <- shift_marginals(
+            effective_beta$marginals$beta_l3,
+            shift_l3
+        )
+    }
+}
+
+# Level 1 effective beta is the adjusted raw level-1 beta.
+effective_beta$summaries$beta_l1 <-
+    raw_beta$summaries$beta_l1
+
+effective_beta$marginals$beta_l1 <-
+    raw_beta$marginals$beta_l1
+
+effective_beta$metadata$beta_l1 <-
+    raw_beta$metadata$beta_l1
+
+# Reduce marginal storage size.
+raw_beta$marginals <- lapply(
+    raw_beta$marginals,
+    compress_marginal_list,
+    max_points = 200L
+)
+
+effective_beta$marginals <- lapply(
+    effective_beta$marginals,
+    compress_marginal_list,
+    max_points = 200L
+)
+
+# ---- Returned structure ----
+# -- Raw betas (for l2; deltas for l2-3) --
+# res$beta_components$summaries
+# res$beta_components$marginals
+# res$beta_components$samples   (if joint samples drawn)
+#
+# -- Effective betas (l1-3) --
+# res$beta_effective$summaries
+# res$beta_effective$marginals
+# res$beta_effective$samples   (if joint samples drawn)
+res <- list(
+    control = list(
+        predictor = list(
+            compute = TRUE
+        ),
+        compute = list(
+            dic = TRUE,
+            waic = TRUE,
+            cpo = TRUE,
+            config = TRUE
+        )
+    ),
+
+    hierarchy = list(
+        n_levels = n_hierarchy_levels,
+        level_2_mapping = if (n_hierarchy_levels >= 2L) {
+            rdat$level_2_mapping
+        } else {
+            NULL
+        },
+        level_3_mapping = if (n_hierarchy_levels >= 3L) {
+            rdat$level_3_mapping
+        } else {
+            NULL
+        }
+    ),
+
+    # Raw latent hierarchy:
+    # beta_l1, delta_l2, delta_l3
+    beta_components = list(
+        summaries = raw_beta$summaries,
+        marginals = raw_beta$marginals,
+        metadata = raw_beta$metadata
+    ),
+
+    # Biologically interpreted coefficients:
+    # beta_l1
+    # beta_l1 + delta_l2
+    # beta_l1 + delta_l2 + delta_l3
+    beta_effective = list(
+        summaries = effective_beta$summaries,
+        marginals = effective_beta$marginals,
+        metadata = effective_beta$metadata
+    ),
+
+    hyper_summary = fit$summary.hyperpar,
+
+    log_lambda = list(
+        mean = fit$summary.linear.predictor$mean[idx_est],
+        sd = fit$summary.linear.predictor$sd[idx_est]
+    ),
+
+    lambda = list(
+        mean = fit$summary.fitted.values$mean[idx_est] /
+            size_factors,
+        sd = fit$summary.fitted.values$sd[idx_est] /
+            size_factors
+    ),
+
+    epsilon = list(
+        mean = fit$summary.random$sample_id$mean,
+        sd = fit$summary.random$sample_id$sd
+    )
+)
+
 if (spatial) {
-    res$psi = list(
+    res$psi <- list(
         mean = fit$summary.random$region_id$mean,
         sd = fit$summary.random$region_id$sd
     )
 }
-if (draw_samples) {
-    res$beta_samples = beta_samples
-}
-if (beta_priors) {
-    # INLA only tracks centered versions; need to add offset before saving:
-    res$beta_marginals <- Map(
-        function(marg, shift) {
-            INLA::inla.tmarginal(
-                fun = function(x) x + shift,
-                marginal = marg
-            )
-        },
-        beta_marginals,
-        beta_mean
-    )
-    # Make sure INLA doesn't use too many grid points to store marginals, keeping file size manageable
-    # (INLA is compact with model="iid" (around 40 points per beta), but not with model="generic0" (potentially thousands)) 
-    res$beta_marginals <- lapply(res$beta_marginals, function(m) {
-        idx <- unique(round(seq(1, nrow(m), length.out = min(200, nrow(m)))))
-        m[idx, , drop = FALSE]
-    })
-    
-    res$beta_summary$mean <- beta_summary$mean + beta_mean
-    res$beta_summary$`0.025quant` <- beta_summary$`0.025quant` + beta_mean
-    res$beta_summary$`0.5quant`   <- beta_summary$`0.5quant`   + beta_mean
-    res$beta_summary$`0.975quant` <- beta_summary$`0.975quant` + beta_mean
-    if (draw_samples) { 
-        res$beta_samples = beta_samples + beta_mean 
-    }
-}
 
-# Summaries of model evaluation criteria: DIC, WAIC, CPO
-res$criteria = list(
-  dic = list(
-    value  = fit$dic$dic,        # DIC score (lower is better)
-    p_eff  = fit$dic$p.eff       # Effective number of parameters (model complexity)
-  ),
-  waic = list(
-    value  = fit$waic$waic,      # WAIC score (preferred over DIC; lower is better)
-    p_eff  = fit$waic$p.eff      # Effective number of parameters under WAIC
-  ),
-  cpo = list(
-    sum_lcpo = sum(fit$cpo$lcpo, na.rm = TRUE),   # Sum log CPO (higher is better predictive fit)
-    n_fail   = sum(fit$cpo$failure)               # Number of failed CPO evaluations (should be 0)
-  )
-)
+if (draw_samples) {
+    res$beta_components$samples <-
+        beta_posterior_samples$components
+
+    res$beta_effective$samples <-
+        beta_posterior_samples$effective
+}      
 
 # ---- Create output directory ----
 subdir = as.character(floor(as.integer(index)/100))
