@@ -400,9 +400,12 @@ fit_args = list(
     data = inla.stack.data(stk),
     control.predictor = list(A = inla.stack.A(stk), compute = TRUE),
     control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE, config = TRUE),
-    offset = log_size_factors,
-    lincomb = effective_beta_lincombs
+    offset = log_size_factors
 )
+# Only add when multiple hierarchical levels exist (lincombs tell model to track/output marginals over low-level betas)
+if (length(effective_beta_lincombs) > 0L) {
+    fit_args$lincomb <- effective_beta_lincombs
+}
 if (beta_priors) { 
     fit_args$offset = log_size_factors + beta_prior_offset
 }
