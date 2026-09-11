@@ -127,6 +127,33 @@ Note that sandbox containers are mutable and therefore less reproducible than `.
 
 ## Data preprocessing
 
+abcSplotch currently supports processing of two classes of data:
+
+### Cell-level ST (e.g., cell-segmented Visium HD)
+
+```splotch_generate_input_files_hd``` processes raw data in the form of (cells x genes) AnnData objects, paired with a sample-level metadata table:
+
+```bash
+splotch_generate_input_files_hd \
+    -c COUNT_FILES.h5ad \   # List of .h5ad-serialized AnnData files containing raw counts for each sample
+    -m METADATA_FILE.tsv \  # Table mapping samples to counts ("Anndata File") and annotations ("Level [1/2/3]")
+    -l NUM_LEVELS \         # Number of levels in the hierarchical model of sample annotations (1, 2 or 3)
+    -s SCALING_FACTOR \     # Depth to which raw counts will be scaled (e.g., median sequencing depth)
+    -d MIN_DEPTH \          # Drop cells with fewer than this many counts
+    -o OUTPUT_DIRECTORY \   # Directory in which to save generated input files
+    [-n/--no-car] \         # Disable spatial (CAR) model
+    [-r REGION_SIZE] \      # Width of regions in which to model spatial effect (in units of CELL_X, CELL_Y)
+    [-x CELL_X] \           # Column in input AnnData.obs containing cell x-coordinate
+    [-y CELL_Y] \           # Column in input AnnData.obs containing cell y-coordinate
+    [-a CELL_ANNOTATION]    # Column in input AnnData.obs containing cell type annotation
+```
+
+### Bin/spot-level ST (Visium, binned Visium HD, ST v1)
+
+```splotch_generate_input_files``` operates identically to the [original cSplotch model](https://github.com/adaly/cSplotch#preparation-of-input-data-for-csplotch), processing the outputs of [Spaceranger](https://www.10xgenomics.com/support/software/space-ranger/latest) directly.
+
+---
+
 ## Model execution
 
 Example:
