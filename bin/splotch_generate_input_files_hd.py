@@ -34,18 +34,19 @@ from splotch.utils_visium import unique_annots_loupe, read_annot_matrix_loupe, \
 
 from splotch.utils_sc import celltype_beta_priors
 
-from splotch.utils_visiumHD import get_region_adjacency_matrix, get_cell_adjacency_matrix, generate_dirctionary
+from splotch.utils_visiumHD import get_region_adjacency_matrix, get_cell_adjacency_matrix, generate_dictionary
+
+pd_nan_values = ['','#N/A','#N/A N/A', '#NA', '-1.#IND', '-1.#QNAN', '-NaN', '-nan', '1.#IND', '1.#QNAN', '<NA>', 'N/A', 'NA', 'NULL', 'NaN', 'n/a', 'nan', 'null']
 
 
 def generate_splotch_inputs(count_files,metadata_file,
-                            maximum_number_of_spots_per_tissue_section,
                             median_sequencing_depth,
                             n_levels,minimum_sequencing_depth,
-                            output_directory,car,zi,nb,region,
-                            Visium=False,compositional=False,hd_binning=None,
-                            sc_adata=None,sc_group_key=None,sc_gene_symbols=None):
+                            output_directory,car,region=None,
+                            annot_col='annotation',
+                            x_col='x', y_col='y'
+                           ):
     aar_matrix_list = []
-    mouse_mapping_list = []
     levels_list = []
     tissue_mapping_list = []
     counts_list = []
@@ -62,19 +63,19 @@ def generate_splotch_inputs(count_files,metadata_file,
     # Read sample metadata with explicit NA handling.
     metadata = pd.read_csv(metadata_file,header=0,sep='\t',keep_default_na=False,na_values=pd_nan_values)
 
-      # three levels
+    # three levels
     if n_levels == 3:
         levels = {key:{} for key in list(metadata['Level 1'].unique())}
         for level_1 in levels:
-        levels[level_1] = {key: {} for key in list(metadata[metadata['Level 1'] == level_1]['Level 2'].unique())}
-        for level_2 in levels[level_1]:
-            levels[level_1][level_2] = list(metadata[(metadata['Level 1'] == level_1) & (metadata['Level 2'] == level_2)]['Level 3'].unique())
+            levels[level_1] = {key: {} for key in list(metadata[metadata['Level 1'] == level_1]['Level 2'].unique())}
+            for level_2 in levels[level_1]:
+                levels[level_1][level_2] = list(metadata[(metadata['Level 1'] == level_1) & (metadata['Level 2'] == level_2)]['Level 3'].unique())
 
     # two levels
     elif n_levels == 2:
         levels = {key:{} for key in list(metadata['Level 1'].unique())}
         for level_1 in levels:
-        levels[level_1] = list(metadata[metadata['Level 1'] == level_1]['Level 2'].unique())
+            levels[level_1] = list(metadata[metadata['Level 1'] == level_1]['Level 2'].unique())
 
     # one level
     elif n_levels == 1:
@@ -88,28 +89,44 @@ def generate_splotch_inputs(count_files,metadata_file,
     N_levels = [0]*n_levels
     n_elements_per_level(levels,0,N_levels)
 
-    adata = ad.read('/gpfs/commons/groups/innovation/sarah/004/abcSplotch/splotch/CRC14NT_FINAL.unified.h5ad')
+    # Just pick the first
+    adata = ad.read(count_files[0])
 
-    # Global gene and cell type annotations used for all tissue sections.
-    genes = adata.var_names.to_numpy(dtype=str)
-    celltype_names = np.loadtxt("/gpfs/commons/groups/innovation/sarah/004/abcSplotch/splotch/cell_type_categories.txt", dtype=str)
+    # Find unique annotations and shared genes across all arrays
+    celltype_names = np.unique(adata.obs[annot_col].values)
+    shared_genes = adata.var_names
+    if len(count_files) > 1:
+        for cfile in count_files[1:]:
+            adata = sc.read_h5ad(cfile)
+            for col in [annot_col, x_col, y_col]:
+                if col not in adata.obs.columns:
+                    logging.critical("%s missing from counts file %s" % (col, cfile))
+                    sys.exit(1)
+            celltype_names = np.union1d(celltype_names, np.unique(adata.obs[annot_col].values))
+            shared_genes = np.intersect1d(shared_genes, adata.var_names)
 
-    N_genes = len(genes)
+    N_genes = len(shared_genes)
     N_covariates = len(celltype_names)
-
-
-    count_files =  metadata['Anndata_File'].to_numpy().astype(str)
+    logging.info("Detected %d unique annotations and %d shared genes across all tissue sections" % (N_covariates, N_genes))        
 
     offset = 1
     for file in count_files:
+        # Check if file has a metadata entry
+        if file not in metadata['Anndata_File'].values:
+            logging.warning("Count file %s will not be considered as it has no metadata entry" % cfile)
+            continue
+        if np.sum(metadata['Anndata_File']==cfile) > 1:
+            logging.warning("Count file %s will not be considered as it maps to MULTIPLE metadata entries!" % cfile)
+            continue
+        
         # Load the current tissue section and extract coordinate and count data.
         adata = ad.read(file)
-        array_genes = adata.var_names.to_numpy(dtype=str)
-        array_coordinates_float = adata.obs[['array_row', 'array_col']].to_numpy()
+        adata = adata[:, shared_genes]
+        
+        array_coordinates_float = adata.obs[[y_col, x_col]].to_numpy()
         array_coordinates_str = np.array([
-        f"{int(r)}_{int(c)}"
-        for r, c in array_coordinates_float
-    ])
+            f"{int(r)}_{int(c)}" for r, c in array_coordinates_float
+        ])
         array_counts = adata.X.toarray()
         array_counts_per_spot = array_counts.sum(axis = 1)
         array_metadata = metadata[metadata['Anndata_File'] == file]
@@ -118,10 +135,9 @@ def generate_splotch_inputs(count_files,metadata_file,
         tissue_mapping = last_level_identifiers[str(array_levels)]
 
         # Convert region-celltype annotations to a one-hot annotation matrix.
-        array_aar_matrix = adata.obs['region_celltype'].to_numpy(dtype=str) 
+        array_aar_matrix = adata.obs[annot_col].to_numpy(dtype=str) 
         array_aar_matrix = (array_aar_matrix[:, None] == celltype_names[None, :]).astype(int)
 
-        minimum_sequencing_depth = 100.0
         good_spots = array_counts_per_spot >= minimum_sequencing_depth  
 
         # Filter out low-depth spots from the current tissue section.
@@ -132,7 +148,7 @@ def generate_splotch_inputs(count_files,metadata_file,
 
 
         if car:
-            if region: 
+            if region is not None: 
                 if region_list:
                     offset = np.unique(region_list[-1])[-1] + 1
                 region_ids, tissue_section_W, connected_spots = get_region_adjacency_matrix(coords = array_coordinates_float, offset = offset)   
@@ -169,7 +185,7 @@ def generate_splotch_inputs(count_files,metadata_file,
 
         if car:
             # adjacency matrix of the spots on the current tissue section
-            if region: 
+            if region is not None: 
                 region_list.append(region_ids)
             W_list.append(tissue_section_W)
             # number of adjacent spot pairs
@@ -187,20 +203,19 @@ def generate_splotch_inputs(count_files,metadata_file,
                                 W_list,W_n_list,car,True,False,
                                 True,cellcomp_matrix_list, region_list)
 
-    output_directory = '/gpfs/commons/groups/innovation/sarah/004/crc_genes_car_region_small'
 
     for gene_idx in range(N_genes):
 
         data['counts']  = get_counts(gene_idx,N_tissues,counts_list)
 
         if (gene_idx+1) % 1000 == 0:
-        logging.info('%d/%d'%(gene_idx+1,len(genes)))
+            logging.info('%d/%d'%(gene_idx+1,len(genes)))
 
         # create the directory if it does not exist
         bucket = (gene_idx+1) // 100
         dirpath = os.path.normpath(f'{output_directory}/{bucket}/')
         if not os.path.exists(dirpath):
-        os.makedirs(dirpath)
+            os.makedirs(dirpath)
 
         # create the input data file containing data for the current gene
         # using the R dump format
@@ -213,5 +228,68 @@ def generate_splotch_inputs(count_files,metadata_file,
                     'n_levels':n_levels,'metadata':metadata,'scaling_factor':median_sequencing_depth,'car':True,'zi':True,'nb':False}
 
     logging.info('Finished')
-    output_directory = '/gpfs/commons/groups/innovation/sarah/004/crc_genes_car_region_small'
-    pickle.dump(info_dict,open(os.path.normpath('/gpfs/commons/groups/innovation/sarah/004/crc_genes_car_region_small/information.p'),'wb'))
+    pickle.dump(info_dict,open(os.path.normpath('%s/information.p'%(output_directory)),'wb'))
+
+if __name__ == '__main__':
+
+  def levels_type(x):
+    x = int(x)
+    if x not in [1,2,3]:
+      raise argparse.ArgumentTypeError("Number of levels should be either 1, 2 or 3")
+    return x
+
+  parser = argparse.ArgumentParser(
+    description='A script for generating input data for Splotch')
+  parser.add_argument('-c','--count_files',action='store',
+                      dest='count_files',type=str,nargs='+',
+                      required=True,help='list of count files in h5ad-serialized AnnData format')
+  parser.add_argument('-m','--metadata_file',action='store',
+                      dest='metadata_file',type=str,required=True,
+                      help='metadata filename')
+  parser.add_argument('-s','--scaling_factor',action='store',
+                      dest='scaling_factor',type=float,required=True,
+                      help='scaling_factor (e.g. median sequencing depth over spots)')
+  parser.add_argument('-l','--n_levels',action='store',
+                      dest='n_levels',type=levels_type,required=False,default=3,
+                      help='number of levels in the linear model (default is 3)')
+  parser.add_argument('-d','--min_depth',action='store',
+                      dest='minimum_sequencing_depth',type=float,
+                      required=False,default=100.0,
+                      help='minimum number of UMIs per spot (default is 100)')
+  parser.add_argument('-n','--no-car',action='store_false',dest='car',required=False,
+                      help='disable the conditional autoregressive prior')
+  parser.add_argument('-o','--output_directory',action='store',
+                      dest='output_directory',type=str,
+                      required=False,default='abcsplotch_inputs',
+                      help='output_directory (default is "abcsplotch_inputs")')
+  parser.add_argument('-r', '--region', type=float, default=None, dest='region',required=False,
+                      help='Model spatial effects across regions of specified width')
+  parser.add_argument('-x', '--x_col', type=str, default='x', dest=x_col, required=False,
+                      help='Column in adata.obs in which x-coordinate of spatial measurements is stored')
+  parser.add_argument('-y', '--y_col', type=str, default='y', dest=y_col, required=False,
+                      help='Column in adata.obs in which y-coordinate of spatial measurements is stored')
+  parser.add_argument('-a', '--annot_col', type=str, default='annotation', dest=annot_col, required=False,
+                      help='Column in adata.obs in which annotation of spatial measurements is stored')
+
+  parser.set_defaults(car=True)
+  options = parser.parse_args()
+
+  # check that the supplied read count files exist
+  for filename in options.count_files:
+    if not os.path.isfile(filename):
+      logging.critical('Count file %s does not exist!'%(filename))
+      sys.exit(1)
+  # check that the supplied metadata file exists
+  if not os.path.isfile(options.metadata_file):
+    logging.critical('Metadata file %s does not exist!'%(options.metadata_file))
+    sys.exit(1)
+
+
+  # generate the data dictionaries 
+  generate_splotch_inputs(options.count_files,options.metadata_file,
+                          options.scaling_factor,options.n_levels,
+                          options.minimum_sequencing_depth,options.output_directory,
+                          options.car, region=options.region, annot_col=options.annot_col,
+                          x_col=options.x_col, y_col=options.y_col)
+                         
+  sys.exit(0)

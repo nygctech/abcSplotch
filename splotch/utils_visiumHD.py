@@ -1,6 +1,4 @@
-def get_region_adjacency_matrix(coords=None, offset = 0):
-    bin_size = 50
-
+def get_region_adjacency_matrix(coords=None, offset=0, bin_size=50):
     grid_x = np.floor(coords[:,0] / bin_size).astype(int)
     grid_y = np.floor(coords[:,1] / bin_size).astype(int)
 
