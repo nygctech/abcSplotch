@@ -29,7 +29,8 @@ Issues = "https://github.com/nygctech/abcSplotch/issues"
 packages = ["splotch"]
 script-files = [
   "bin/splotch_prepare_count_files",
-  "bin/splotch_generate_input_files"
+  "bin/splotch_generate_input_files",
+  "bin/splotch_generate_input_files_hd"
 ]
 include-package-data = true
 

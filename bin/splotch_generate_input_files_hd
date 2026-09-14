@@ -23,16 +23,8 @@ logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
 import splotch
 
-from splotch.utils import get_variable_mappings, watershed_tissue_sections, \
-  print_summary, read_aar_matrix, read_array, read_array_metadata, \
-  detect_tissue_sections, get_spot_adjacency_matrix, get_counts, \
-  generate_W_sparse, generate_column_labels, generate_dictionary, \
-  get_tissue_section_spots, filter_arrays, n_elements_per_level, to_rdump, \
-  read_cellcomp_matrix
-
-from splotch.utils_visium import unique_annots_loupe, read_annot_matrix_loupe, \
-  detect_tissue_sections_hex, get_tissue_section_spots_hex, \
-  get_spot_adjacency_matrix_hex, visium_find_position_file
+from splotch.utils import get_variable_mappings, get_counts, \
+  generate_column_labels, filter_arrays, n_elements_per_level, to_rdump
 
 from splotch.utils_sc import celltype_beta_priors
 
@@ -59,14 +51,24 @@ def generate_splotch_inputs(count_files,metadata_file,
     W_n_list = []
     region_list = []
     files_list = []
-    cellcomp_matrix_list = []
-
+    regional = region is not None
 
     # Read sample metadata with explicit NA handling.
     metadata = pd.read_csv(metadata_file,header=0,sep='\t',keep_default_na=False,na_values=pd_nan_values)
 
+    if 'Level 1' not in metadata.columns:
+        logging.critical('"Level 1" sample annotation missing from metadata')
+        sys.exit(1)
+    if 'Anndata File' not in metadata.columns:
+        logging.critical('"Anndata File" sample information missing from metadata')
+        sys.exit(1)
+
     # three levels
     if n_levels == 3:
+        for l in ['Level 3', 'Level 2']:
+            if l not in metadata.columns:
+                logging.critical('%d levels specified, but "%s" sample annotation missing from metadata' % (n_levels, l))
+                sys.exit(1)
         levels = {key:{} for key in list(metadata['Level 1'].unique())}
         for level_1 in levels:
             levels[level_1] = {key: {} for key in list(metadata[metadata['Level 1'] == level_1]['Level 2'].unique())}
@@ -75,6 +77,9 @@ def generate_splotch_inputs(count_files,metadata_file,
 
     # two levels
     elif n_levels == 2:
+        if 'Level 2' not in metadata.columns:
+            logging.critical('2 levels specified, but "Level 2" sample annotation missing from metadata')
+            sys.exit(1)
         levels = {key:{} for key in list(metadata['Level 1'].unique())}
         for level_1 in levels:
             levels[level_1] = list(metadata[metadata['Level 1'] == level_1]['Level 2'].unique())
@@ -92,7 +97,7 @@ def generate_splotch_inputs(count_files,metadata_file,
     n_elements_per_level(levels,0,N_levels)
 
     # Just pick the first
-    adata = ad.read(count_files[0])
+    adata = sc.read_h5ad(count_files[0])
 
     # Find unique annotations and shared genes across all arrays
     celltype_names = np.unique(adata.obs[annot_col].values)
@@ -114,15 +119,15 @@ def generate_splotch_inputs(count_files,metadata_file,
     offset = 1
     for file in count_files:
         # Check if file has a metadata entry
-        if file not in metadata['Anndata_File'].values:
+        if file not in metadata['Anndata File'].values:
             logging.warning("Count file %s will not be considered as it has no metadata entry" % cfile)
             continue
-        if np.sum(metadata['Anndata_File']==cfile) > 1:
+        if np.sum(metadata['Anndata File']==cfile) > 1:
             logging.warning("Count file %s will not be considered as it maps to MULTIPLE metadata entries!" % cfile)
             continue
         
         # Load the current tissue section and extract coordinate and count data.
-        adata = ad.read(file)
+        adata = sc.read_h5ad(file)
         adata = adata[:, shared_genes]
         
         array_coordinates_float = adata.obs[[y_col, x_col]].to_numpy()
@@ -131,8 +136,8 @@ def generate_splotch_inputs(count_files,metadata_file,
         ])
         array_counts = adata.X.toarray()
         array_counts_per_spot = array_counts.sum(axis = 1)
-        array_metadata = metadata[metadata['Anndata_File'] == file]
-        array_levels = [array_metadata['Level_%d'%(idx+1)].values[0] for idx in range(0,n_levels)]
+        array_metadata = metadata[metadata['Anndata File'] == file]
+        array_levels = [array_metadata['Level %d'%(idx+1)].values[0] for idx in range(0,n_levels)]
 
         tissue_mapping = last_level_identifiers[str(array_levels)]
 
@@ -150,7 +155,7 @@ def generate_splotch_inputs(count_files,metadata_file,
 
 
         if car:
-            if region is not None: 
+            if regional: 
                 if region_list:
                     offset = np.unique(region_list[-1])[-1] + 1
                 region_ids, tissue_section_W, connected_spots = get_region_adjacency_matrix(coords = array_coordinates_float, offset = offset)   
@@ -187,7 +192,7 @@ def generate_splotch_inputs(count_files,metadata_file,
 
         if car:
             # adjacency matrix of the spots on the current tissue section
-            if region is not None: 
+            if regional: 
                 region_list.append(region_ids)
             W_list.append(tissue_section_W)
             # number of adjacent spot pairs
@@ -198,12 +203,11 @@ def generate_splotch_inputs(count_files,metadata_file,
 
     # Build the full data dictionary prior to R dump generation.
     data = generate_dictionary(N_spots_list,N_tissues,N_covariates,
-                                N_levels,
-                                coordinates_list,size_factors_list,
-                                aar_matrix_list,level_mappings,
-                                tissue_mapping_list,
-                                W_list,W_n_list,car,True,False,
-                                True,cellcomp_matrix_list, region_list)
+        N_levels,coordinates_list,
+        size_factors_list,aar_matrix_list,
+        level_mappings,tissue_mapping_list,
+        W_list,W_n_list,car,regional,False,True,
+        region_list)
 
 
     for gene_idx in range(N_genes):
@@ -211,7 +215,7 @@ def generate_splotch_inputs(count_files,metadata_file,
         data['counts']  = get_counts(gene_idx,N_tissues,counts_list)
 
         if (gene_idx+1) % 1000 == 0:
-            logging.info('%d/%d'%(gene_idx+1,len(genes)))
+            logging.info('%d/%d'%(gene_idx+1,len(shared_genes)))
 
         # create the directory if it does not exist
         bucket = (gene_idx+1) // 100
@@ -226,8 +230,8 @@ def generate_splotch_inputs(count_files,metadata_file,
     filenames_coordinates = generate_column_labels(files_list,coordinates_list)
 
     # Save metadata and mapping information for downstream analysis.
-    info_dict = {'genes':genes,'filenames_and_coordinates':filenames_coordinates,'annotation_mapping':celltype_names,'beta_mapping':conditions_to_variables,
-                    'n_levels':n_levels,'metadata':metadata,'scaling_factor':median_sequencing_depth,'car':True,'zi':True,'nb':False}
+    info_dict = {'genes':shared_genes,'filenames_and_coordinates':filenames_coordinates,'annotation_mapping':celltype_names,'beta_mapping':conditions_to_variables,
+                    'n_levels':n_levels,'metadata':metadata,'scaling_factor':median_sequencing_depth,'car':car,'zi':False,'nb':True}
 
     logging.info('Finished')
     pickle.dump(info_dict,open(os.path.normpath('%s/information.p'%(output_directory)),'wb'))
@@ -266,11 +270,11 @@ if __name__ == '__main__':
                       help='output_directory (default is "abcsplotch_inputs")')
   parser.add_argument('-r', '--region', type=float, default=None, dest='region',required=False,
                       help='Model spatial effects across regions of specified width')
-  parser.add_argument('-x', '--x_col', type=str, default='x', dest=x_col, required=False,
+  parser.add_argument('-x', '--x_col', type=str, default='x', dest='x_col', required=False,
                       help='Column in adata.obs in which x-coordinate of spatial measurements is stored')
-  parser.add_argument('-y', '--y_col', type=str, default='y', dest=y_col, required=False,
+  parser.add_argument('-y', '--y_col', type=str, default='y', dest='y_col', required=False,
                       help='Column in adata.obs in which y-coordinate of spatial measurements is stored')
-  parser.add_argument('-a', '--annot_col', type=str, default='annotation', dest=annot_col, required=False,
+  parser.add_argument('-a', '--annot_col', type=str, default='annotation', dest='annot_col', required=False,
                       help='Column in adata.obs in which annotation of spatial measurements is stored')
 
   parser.set_defaults(car=True)

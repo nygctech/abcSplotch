@@ -1,3 +1,12 @@
+import logging
+import numpy as np
+
+from scipy import sparse
+from scipy.sparse import block_diag, diags, csr_matrix, coo_matrix
+from scipy.spatial import cKDTree
+
+from splotch.utils import generate_W_sparse, sparse_to_csr_indptr
+
 def get_region_adjacency_matrix(coords=None, offset=0, bin_size=50):
     grid_x = np.floor(coords[:,0] / bin_size).astype(int)
     grid_y = np.floor(coords[:,1] / bin_size).astype(int)
@@ -87,7 +96,7 @@ def get_cell_adjacency_matrix(adata=None, coords=None, k=4):
     return adj
 
 
-    def eigs_square_chunking(coords_str, chunksize=10000, k=4, overlap=0):
+def eigs_square_chunking(coords_str, chunksize=10000, k=4, overlap=0):
     """
     Compute eigenvalues of normalized adjacency in spatial chunks (robust).
     """
@@ -159,7 +168,7 @@ def generate_dictionary(N_spots_list,N_tissues,N_covariates,
                         size_factors_list,aar_matrix_list, 
                         level_mappings,tissue_mapping_list,
                         W_list,W_n_list,car,region,zi,nb,
-                        compositional,cellcomp_matrix_list, region_list):
+                        region_list):
 
     data = {'N_spots': N_spots_list,
             'N_tissues': N_tissues,
@@ -189,7 +198,7 @@ def generate_dictionary(N_spots_list,N_tissues,N_covariates,
 
     concatenated_D = []
     for tissue_idx in range(0,N_tissues):
-        concatenated_D = concatenated_D + [numpy.where(tissue_section_aar_matrix)[0][0]+1 \
+        concatenated_D = concatenated_D + [np.where(tissue_section_aar_matrix)[0][0]+1 \
         for tissue_section_aar_matrix in aar_matrix_list[tissue_idx].T]
     data['D'] = concatenated_D
 
@@ -210,21 +219,21 @@ def generate_dictionary(N_spots_list,N_tissues,N_covariates,
             if W_tissue.shape[0] < 10000:
               W = block_diag([W_tissue],format='csr')
               D_sparse_tissue = W.sum(1).A1.astype(int)
-              D_v = diags(1.0/numpy.sqrt(D_sparse_tissue),0,format='csr')
-              evs = numpy.linalg.eigvalsh(D_v.dot(W).dot(D_v).toarray())
+              D_v = diags(1.0/np.sqrt(D_sparse_tissue),0,format='csr')
+              evs = np.linalg.eigvalsh(D_v.dot(W).dot(D_v).toarray())
             else:
               logging.info('Tissue %d exceeds 10k connected points -- CAR prior eigenvalues calculated by chunking' % t)
               evs = eigs_square_chunking(coords_tissue, 10000)
             eigval_list.append(evs)
-        data['eig_values'] = numpy.sort(numpy.concatenate(eigval_list))
+        data['eig_values'] = np.sort(np.concatenate(eigval_list))
         
-        V, U = sparse_to_csr_indptr(data['W_sparse'], numpy.sum(data['N_spots']))
+        V, U = sparse_to_csr_indptr(data['W_sparse'], np.sum(data['N_spots']))
         data['U'] = U 
         data['V'] = V
 
     else:
         data['W_n'] = []
-        data['W_sparse'] = numpy.zeros((0,0))
+        data['W_sparse'] = np.zeros((0,0))
         data['D_sparse'] = []
         data['eig_values'] = []
         data['U'] = []
