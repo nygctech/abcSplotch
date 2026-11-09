@@ -158,7 +158,7 @@ def generate_splotch_inputs(count_files,metadata_file,
             if regional: 
                 if region_list:
                     offset = np.unique(region_list[-1])[-1] + 1
-                region_ids, tissue_section_W, connected_spots = get_region_adjacency_matrix(coords = array_coordinates_float, offset = offset)   
+                region_ids, tissue_section_W, connected_spots = get_region_adjacency_matrix(coords = array_coordinates_float, offset = offset, bin_size=region)   
 
                 array_coordinates_str,array_coordinates_float,array_counts,array_counts_per_spot, array_aar_matrix = \
                 filter_arrays(connected_spots,coordinates_str=array_coordinates_str,
@@ -212,7 +212,7 @@ def generate_splotch_inputs(count_files,metadata_file,
 
     for gene_idx in range(N_genes):
 
-        data['counts']  = get_counts(gene_idx,N_tissues,counts_list)
+        data['counts']  = numpy.array(get_counts(gene_idx,N_tissues,counts_list)).astype(int)
 
         if (gene_idx+1) % 1000 == 0:
             logging.info('%d/%d'%(gene_idx+1,len(shared_genes)))
